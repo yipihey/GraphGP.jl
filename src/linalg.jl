@@ -71,19 +71,15 @@ end
     return nothing
 end
 
-# Reverse-mode pullback of `logdet = log(L[KP1,KP1])` w.r.t. the original (lower-triangle)
-# covariance entries, where `L = chol_lower!(A)`. Given the factor `L` and a zeroed scratch
-# `Lbar` (KP1 x KP1), fills the lower triangle of `Abar` with the cotangents
-# `Abar[i,j] = d logdet / d A[i,j]`. `seed` is the incoming cotangent on `logdet`.
+# Generic reverse-mode pullback of chol_lower! w.r.t. the original (lower-triangle)
+# covariance entries. `Lbar` must be pre-filled with the incoming cotangents on the
+# Cholesky factor entries (lower triangle); `Abar` is filled with d(loss)/d(A[i,j]).
+# `Lbar` is consumed (modified in place) during the backward sweep.
 #
 # This is the exact reverse of the left-looking recurrence in `chol_lower!`, derived by
 # reverse-accumulating each scalar operation; validated numerically against Enzyme / JAX.
-@inline function chol_logdet_pullback!(Abar, Lbar, L, ::Val{KP1}, seed::T) where {KP1, T}
+@inline function chol_pullback!(Abar, Lbar, L, ::Val{KP1}) where {KP1}
     @inbounds begin
-        for j in 1:KP1, i in 1:KP1
-            Lbar[i, j] = zero(T)
-        end
-        Lbar[KP1, KP1] = seed / L[KP1, KP1]   # d(seed*log(L[n,n]))/dL[n,n]
         for j in KP1:-1:1
             ljj = L[j, j]
             for i in KP1:-1:(j + 1)
@@ -103,5 +99,17 @@ end
             end
         end
     end
+    return nothing
+end
+
+# Logdet-specific wrapper: seed the Lbar with d(seed·log L[KP1,KP1])/dL, then call chol_pullback!.
+@inline function chol_logdet_pullback!(Abar, Lbar, L, ::Val{KP1}, seed::T) where {KP1, T}
+    @inbounds begin
+        for j in 1:KP1, i in 1:KP1
+            Lbar[i, j] = zero(T)
+        end
+        Lbar[KP1, KP1] = seed / L[KP1, KP1]
+    end
+    chol_pullback!(Abar, Lbar, L, Val(KP1))
     return nothing
 end
