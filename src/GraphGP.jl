@@ -16,7 +16,7 @@ include("orchestrate.jl")
 include("tree.jl")
 include("graph_build.jl")
 
-export GraphGPProblem
+export GraphGPProblem, npoints, nneighbors, nrefined, ndims_space, nbins
 export cov_lookup
 export refine_logdet, refine_logdet_terms, refine_inv, refine_inv!
 export refine, refine!

@@ -63,15 +63,21 @@ end
     # hyperparam_grad should match ForwardDiff.gradient of the full chain.
     g_hyp = hyperparam_grad(g_cov, make_rbf, hyperparams)
     @test length(g_hyp) == 2
-    @test !any(isnan, g_hyp)
+    @test all(isfinite, g_hyp)
 
-    # Cross-check: ForwardDiff through the full refine_logdet ∘ make_rbf chain.
-    function full_logdet(hp)
-        _, new_vals = make_rbf(hp[1], hp[2])
-        new_prob = GraphGPProblem(prob.coords, prob.neighbors, prob.offsets, prob.n0,
-            prob.scale, Float64.(prob.bins), Float64.(new_vals))
-        return refine_logdet(new_prob)
+    # Cross-check: finite differences on the full refine_logdet ∘ make_rbf chain.
+    # (ForwardDiff through the KA kernel would require Dual-valued GraphGPProblem — skip.)
+    eps_fd = 1e-5
+    g_fd = map(1:2) do i
+        hp_p = copy(hyperparams); hp_p[i] += eps_fd
+        hp_m = copy(hyperparams); hp_m[i] -= eps_fd
+        _, vp = make_rbf(hp_p[1], hp_p[2])
+        _, vm = make_rbf(hp_m[1], hp_m[2])
+        pp = GraphGPProblem(prob.coords, prob.neighbors, prob.offsets, prob.n0,
+            prob.scale, prob.bins, vp)
+        pm = GraphGPProblem(prob.coords, prob.neighbors, prob.offsets, prob.n0,
+            prob.scale, prob.bins, vm)
+        (refine_logdet(pp) - refine_logdet(pm)) / (2 * eps_fd)
     end
-    g_ref = ForwardDiff.gradient(full_logdet, hyperparams)
-    @test isapprox(g_hyp, g_ref; rtol = 1e-8, atol = 1e-12)
+    @test isapprox(g_hyp, g_fd; rtol = 1e-4, atol = 1e-8)
 end

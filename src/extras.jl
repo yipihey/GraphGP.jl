@@ -26,8 +26,12 @@ Squared-exponential (RBF) covariance discretized onto `n_bins` logspaced bins.
 function rbf_kernel(variance, scale, r_min::Real, r_max::Real, n_bins::Int;
         jitter=zero(variance))
     bins = make_cov_bins(r_min, r_max, n_bins)
+    # Cast bins to the promoted computation type so eltype(vals) == typeof(variance+scale),
+    # not Float64 (the type make_cov_bins always returns).
+    T = typeof(one(variance) + one(scale))
     vals = map(eachindex(bins)) do i
-        v = variance * exp(-oneunit(variance) / 2 * (bins[i] / scale)^2)
+        r = T(bins[i])
+        v = variance * exp(-oneunit(T) / 2 * (r / scale)^2)
         i == 1 ? v * (1 + jitter) : v
     end
     return bins, vals
@@ -58,9 +62,10 @@ function matern_kernel(p::Int, variance, cutoff, r_min::Real, r_max::Real, n_bin
                   loggamma(p - i + 1.0) - loggamma(2p + 1.0) for i in 0:p]
     coeffs = exp.(log_coeffs)
     sqrt2p1 = sqrt(Float64(2p + 1))  # Float64 constant
+    T = typeof(one(variance) + one(cutoff))
     vals = map(eachindex(bins)) do idx
-        # bins[idx] is Float64; cutoff may be Dual — division promotes to Dual.
-        xi = sqrt2p1 * bins[idx] / cutoff
+        r = T(bins[idx])
+        xi = T(sqrt2p1) * r / cutoff
         v = variance * exp(-xi) * _polyval(coeffs, 2 * xi)
         idx == 1 ? v * (1 + jitter) : v
     end
