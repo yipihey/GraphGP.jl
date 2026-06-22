@@ -56,3 +56,47 @@ function refine_inv(prob::GraphGPProblem{T}, values;
     xi = KernelAbstractions.zeros(backend, T, nrefined(prob))
     return refine_inv!(xi, prob, values; backend = backend)
 end
+
+"""
+    refine!(values, prob, xi; backend) -> values
+
+Forward GraphGP generation. `values` must be length `N` with `values[1:n0]` preset to the
+initial (dense first-layer) values; the refined entries `values[n0+1:N]` are filled in.
+Matches the `fast_jit` path of `refine` in `graphgp/refine.py`: a parallel mean/std pass
+followed by a sequential sweep over the depth batches defined by `prob.offsets`.
+"""
+function refine!(values, prob::GraphGPProblem{T}, xi;
+        backend = KernelAbstractions.get_backend(prob)) where {T}
+    M = nrefined(prob)
+    K = nneighbors(prob)
+    D = ndims_space(prob)
+    mean_vec = KernelAbstractions.zeros(backend, T, K, M)
+    std = KernelAbstractions.zeros(backend, T, M)
+    refine_meanvec_std_kernel!(backend)(mean_vec, std, prob.coords, prob.neighbors, prob.n0,
+        prob.scale, prob.bins, prob.vals, nbins(prob), Val(K), Val(D); ndrange = M)
+    KernelAbstractions.synchronize(backend)
+
+    apply = refine_apply_kernel!(backend)
+    offs = prob.offsets                      # 0-based exclusive batch ends; offs[1] == n0
+    for b in 2:length(offs)
+        m_lo = offs[b - 1] - prob.n0 + 1     # first refined column (1-based) in this batch
+        len = offs[b] - offs[b - 1]
+        len <= 0 && continue
+        apply(values, mean_vec, std, prob.neighbors, xi, prob.n0, m_lo, Val(K); ndrange = len)
+        KernelAbstractions.synchronize(backend)
+    end
+    return values
+end
+
+"""
+    refine(prob, initial_values, xi; backend) -> values
+
+Allocating form of [`refine!`](@ref). `initial_values` are the first `n0` values.
+"""
+function refine(prob::GraphGPProblem{T}, initial_values, xi;
+        backend = KernelAbstractions.get_backend(prob)) where {T}
+    N = npoints(prob)
+    values = KernelAbstractions.zeros(backend, T, N)
+    copyto!(view(values, 1:prob.n0), initial_values)
+    return refine!(values, prob, xi; backend = backend)
+end

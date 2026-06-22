@@ -28,28 +28,29 @@ work that dominates runtime when the number of points `M = N − n0` reaches the
 
 | Routine | Status |
 | --- | --- |
-| `refine_logdet` | ✅ forward + gradient |
+| `refine_logdet` | ✅ forward |
 | `refine_inv` / `refine_inv!` | ✅ forward |
-| `refine_logdet_grad_vals` | ✅ Enzyme gradient w.r.t. `cov_vals` |
+| `refine` / `refine!` | ✅ forward generation (sequential depth-batch scan) |
+| `refine_logdet_grad_vals` | ✅ hand-written reverse-mode adjoint (CPU threaded / GPU atomic) |
 | `refine_inv_loss_grad_vals` | ✅ Enzyme gradient of `0.5‖xi‖²` |
-| `refine` (forward generation, sequential scan) | 🚧 planned |
-| hand-written adjoint kernel (faster gradient) | 🚧 planned |
 
-## Benchmarks (preliminary, CPU)
+The hand-written logdet gradient is cross-checked against an Enzyme-through-KA reference
+(`refine_logdet_grad_vals_enzyme`) and the JAX f64 oracle.
+
+## Benchmarks (CPU)
 
 4-core CPU, `N = 200_000`, `k = 10`, `d = 3`, f32 (median of repeated runs):
 
 | Op | GraphGP.jl (4 threads) | JAX (CPU, jit) | speedup |
 | --- | --- | --- | --- |
-| `refine_logdet` | 0.60 s | 2.24 s | **3.7×** |
-| `refine_inv` | 1.14 s | 2.54 s | **2.2×** |
-| `refine_logdet_grad_vals` | 4.28 s | 3.02 s | 0.7× |
+| `refine_logdet` | 0.44 s | 2.24 s | **5.1×** |
+| `refine_inv` | 0.66 s | 2.54 s | **3.9×** |
+| `refine_logdet_grad_vals` | 0.48 s | 3.02 s | **6.3×** |
 
-The forward kernels are already faster than JAX on CPU and never materialize the
-`(M, k+1, k+1)` covariance tensor. The reverse pass currently goes through Enzyme-over-KA
-with runtime activity (correct but allocation-heavy); a hand-written adjoint kernel is the
-next optimization. The one-workitem-per-point design is aimed at the GPU (CUDA.jl) backend,
-which runs on hardware with a GPU (not available in CI here).
+The kernels never materialize the `(M, k+1, k+1)` covariance tensor. The reverse pass uses a
+hand-written analytic Cholesky pullback; on CPU it accumulates into per-task private
+histograms (no atomics), on GPU it scatters with atomics (the one-workitem-per-point design
+targets CUDA.jl — GPU validation runs on hardware with a GPU, not available in CI here).
 
 Reproduce: `julia -t auto --project=julia/GraphGP julia/GraphGP/test/bench.jl 200000 10 3`
 and `python julia/GraphGP/test/bench_jax.py 200000 10 3`.

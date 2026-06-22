@@ -32,3 +32,30 @@
         return y0 + slope * (r - x0)
     end
 end
+
+# Adjoint of `cov_lookup` w.r.t. `vals`: the value at radius `r` is a linear combination of
+# (at most) two `vals` entries. Returns `(lo, w_lo, w_hi)` so that
+# `cov_lookup(r) = w_lo*vals[lo] + w_hi*vals[lo+1]`; a cotangent `g` on the looked-up value
+# scatters as `vals[lo] += g*w_lo`, `vals[lo+1] += g*w_hi`.
+@inline function cov_lookup_weights(r::T, bins, n::Int) where {T}
+    @inbounds begin
+        if r <= bins[1]
+            return (1, one(T), zero(T))
+        elseif r >= bins[n]
+            return (n - 1, zero(T), one(T))
+        end
+        lo = 1
+        hi = n
+        while hi - lo > 1
+            mid = (lo + hi) >>> 1
+            if T(bins[mid]) <= r
+                lo = mid
+            else
+                hi = mid
+            end
+        end
+        x0 = T(bins[lo]); x1 = T(bins[lo + 1])
+        t = (r - x0) / (x1 - x0)
+        return (lo, one(T) - t, t)
+    end
+end

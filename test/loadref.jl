@@ -39,6 +39,12 @@ function load_problem(name::AbstractString; T = Float32)
         grad_logdet_vals64 = Float64.(d["grad_logdet_vals64"]),
         inv_loss64 = Float64(d["inv_loss64"]),
         grad_inv_loss_vals64 = Float64.(d["grad_inv_loss_vals64"]),
+        initial_values32 = Float32.(d["initial_values32"]),
+        initial_values64 = Float64.(d["initial_values64"]),
+        xi_ref32 = Float32.(d["xi_ref32"]),
+        xi_ref64 = Float64.(d["xi_ref64"]),
+        refine_values32 = Float32.(d["refine_values32"]),
+        refine_values64 = Float64.(d["refine_values64"]),
     )
     return prob, ref
 end

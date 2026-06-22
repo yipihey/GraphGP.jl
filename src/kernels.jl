@@ -54,3 +54,41 @@ end
         xi_out[m] = (values[n0 + m] - mean) / std
     end
 end
+
+# Forward generation, step 1 (fully parallel): per refined point compute and store the
+# conditional-mean weights `mean_vec` (K x M) and `std` (M). These feed the sequential
+# per-batch apply below. `M*K` storage replaces JAX's `(M, k+1, k+1)` materialization.
+@kernel function refine_meanvec_std_kernel!(mean_vec, std, @Const(coords), @Const(neighbors),
+        n0, scale::T, @Const(bins), @Const(vals), nbins,
+        ::Val{K}, ::Val{D}) where {T, K, D}
+    m = @index(Global)
+    A = @private T (K + 1, K + 1)
+    jc = @private UInt32 (K + 1, D)
+    mv = @private T (K,)
+    _gather_joint!(jc, coords, neighbors, m, n0, Val(K), Val(D))
+    assemble_cov!(A, jc, Val(K + 1), Val(D), scale, bins, vals, nbins)
+    chol_lower!(A, Val(K + 1))
+    mean_vec_solve!(mv, A, Val(K))
+    @inbounds begin
+        for j in 1:K
+            mean_vec[j, m] = mv[j]
+        end
+        std[m] = A[K + 1, K + 1]
+    end
+end
+
+# Forward generation, step 2 (per depth batch): `values[n0+m] = mean_vec.values[neighbors] +
+# std*xi` for the refined columns `m_lo .. m_lo+ndrange-1`. Run one batch at a time with a
+# host-side barrier between batches; neighbors of a batch lie strictly in earlier batches.
+@kernel function refine_apply_kernel!(values, @Const(mean_vec), @Const(std), @Const(neighbors),
+        @Const(xi), n0, m_lo, ::Val{K}) where {K}
+    t = @index(Global)
+    m = m_lo + t - 1
+    @inbounds begin
+        acc = zero(eltype(values))
+        for j in 1:K
+            acc += mean_vec[j, m] * values[neighbors[j, m]]
+        end
+        values[n0 + m] = acc + std[m] * xi[m]
+    end
+end

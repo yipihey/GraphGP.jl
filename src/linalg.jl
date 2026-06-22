@@ -70,3 +70,38 @@ end
     end
     return nothing
 end
+
+# Reverse-mode pullback of `logdet = log(L[KP1,KP1])` w.r.t. the original (lower-triangle)
+# covariance entries, where `L = chol_lower!(A)`. Given the factor `L` and a zeroed scratch
+# `Lbar` (KP1 x KP1), fills the lower triangle of `Abar` with the cotangents
+# `Abar[i,j] = d logdet / d A[i,j]`. `seed` is the incoming cotangent on `logdet`.
+#
+# This is the exact reverse of the left-looking recurrence in `chol_lower!`, derived by
+# reverse-accumulating each scalar operation; validated numerically against Enzyme / JAX.
+@inline function chol_logdet_pullback!(Abar, Lbar, L, ::Val{KP1}, seed::T) where {KP1, T}
+    @inbounds begin
+        for j in 1:KP1, i in 1:KP1
+            Lbar[i, j] = zero(T)
+        end
+        Lbar[KP1, KP1] = seed / L[KP1, KP1]   # d(seed*log(L[n,n]))/dL[n,n]
+        for j in KP1:-1:1
+            ljj = L[j, j]
+            for i in KP1:-1:(j + 1)
+                lbij = Lbar[i, j]
+                tbar = lbij / ljj
+                Lbar[j, j] -= lbij * L[i, j] / ljj
+                Abar[i, j] = tbar
+                for p in 1:(j - 1)
+                    Lbar[i, p] -= tbar * L[j, p]
+                    Lbar[j, p] -= tbar * L[i, p]
+                end
+            end
+            sbar = Lbar[j, j] / (2 * ljj)
+            Abar[j, j] = sbar
+            for p in 1:(j - 1)
+                Lbar[j, p] -= 2 * sbar * L[j, p]
+            end
+        end
+    end
+    return nothing
+end

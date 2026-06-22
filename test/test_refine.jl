@@ -13,10 +13,18 @@
     @test isapprox(xi, ref.xi32; rtol = 1e-2, atol = 1e-3)
     @test isapprox(Float64.(xi), ref.xi64; rtol = 2e-2, atol = 2e-3)
 
+    # Forward generation: regenerate values from initial values + refined xi.
+    v = refine(prob32, ref.initial_values32, ref.xi_ref32)
+    @test !any(isnan, v)
+    @test isapprox(v, ref.refine_values32; rtol = 1e-2, atol = 1e-3)
+    @test isapprox(Float64.(v), ref.refine_values64; rtol = 2e-2, atol = 2e-3)
+
     # f64 Julia path (debugging oracle) should match the JAX f64 oracle tightly.
     prob64, _ = load_problem(name; T = Float64)
     ld64 = refine_logdet(prob64)
     @test isapprox(ld64, ref.logdet64; rtol = 1e-6)
     xi64 = refine_inv(prob64, ref.values64)
     @test isapprox(xi64, ref.xi64; rtol = 1e-6, atol = 1e-8)
+    v64 = refine(prob64, ref.initial_values64, ref.xi_ref64)
+    @test isapprox(v64, ref.refine_values64; rtol = 1e-6, atol = 1e-8)
 end

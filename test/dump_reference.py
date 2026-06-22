@@ -111,6 +111,22 @@ def build_case(name, *, n_points, n_dim, n0, k, seed=137):
     out["inv_loss64"] = np.float64(inv_loss)
     out["grad_inv_loss_vals64"] = np.asarray(grad_inv_vals64, dtype=np.float64)
 
+    # Forward refine: from initial (first-n0) values + refined xi, regenerate all values.
+    initial_values64 = values64[:n0]
+    xi_ref64 = jr.normal(jr.key(seed + 7), (M,), dtype=jnp.float64)
+    refined64 = gp.refine(graph.points, graph.neighbors, graph.offsets, covariance64,
+                          initial_values64, xi_ref64)
+    out["initial_values64"] = np.asarray(initial_values64, dtype=np.float64)
+    out["initial_values32"] = np.asarray(initial_values64, dtype=np.float32)
+    out["xi_ref64"] = np.asarray(xi_ref64, dtype=np.float64)
+    out["xi_ref32"] = np.asarray(xi_ref64, dtype=np.float32)
+    out["refine_values64"] = np.asarray(refined64, dtype=np.float64)
+
+    points32f = jnp.asarray(graph.points, dtype=jnp.float32)
+    refined32 = gp.refine(points32f, graph.neighbors, graph.offsets, cov32,
+                          jnp.asarray(initial_values64, jnp.float32), jnp.asarray(xi_ref64, jnp.float32))
+    out["refine_values32"] = np.asarray(refined32, dtype=np.float32)
+
     os.makedirs(OUTDIR, exist_ok=True)
     path = os.path.join(OUTDIR, f"{name}.npz")
     np.savez(path, **out)
