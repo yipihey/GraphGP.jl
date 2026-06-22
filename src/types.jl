@@ -16,6 +16,15 @@ struct GraphGPProblem{T, MC <: AbstractMatrix, MN <: AbstractMatrix, V <: Abstra
     scale::T
     bins::V
     vals::V
+    # Optional reordering permutation: prob.indices[tree_pos] = original_pos.
+    # When built from Python/JAX, this is the `graph.indices` field.
+    # Nothing means the identity permutation (points already in the desired order).
+    indices::Union{Nothing, Vector{Int}}
+end
+
+# Convenience constructors — without indices (backward-compatible).
+function GraphGPProblem(coords, neighbors, offsets, n0, scale, bins, vals)
+    return GraphGPProblem(coords, neighbors, offsets, n0, scale, bins, vals, nothing)
 end
 
 npoints(p::GraphGPProblem) = size(p.coords, 2)
