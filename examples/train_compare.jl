@@ -71,13 +71,12 @@ let variance = 1.0, scale = 0.7
         t0 = time_ns()
         prob = make_prob(variance, scale)
 
-        # loss = -logdet(K) - 0.5*||xi||^2  (= log-likelihood up to a constant)
-        ld              = generate_logdet(prob)
+        # Fused forward+backward: each pass computes value AND gradient in one traversal.
+        ld,  g_ld  = generate_logdet_and_grad_vals(prob)
         inv_loss, g_inv = generate_inv_loss_grad_vals(prob, data)
-        loss            = -ld - inv_loss
+        loss = -ld - inv_loss
 
         # ∂loss/∂vals = -(∂logdet/∂vals + ∂inv_loss/∂vals)
-        g_ld   = generate_logdet_grad_vals(prob)
         g_vals = -(g_ld .+ g_inv)
 
         # Chain rule → ∂loss/∂(variance, scale)
