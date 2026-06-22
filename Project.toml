@@ -1,0 +1,20 @@
+name = "GraphGP"
+uuid = "58493978-3208-4978-a170-e38d678289e7"
+authors = ["graphgp contributors"]
+version = "0.1.0"
+
+[deps]
+KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+
+[compat]
+KernelAbstractions = "0.9"
+julia = "1.10"
+
+[extras]
+NPZ = "15e1cf62-19b3-5cfa-8e77-841668bca605"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test", "Random", "NPZ"]
