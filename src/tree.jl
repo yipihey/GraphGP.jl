@@ -90,9 +90,12 @@ Matches the semantics of `tree.py:build_tree` (level-by-level median split).
 function build_tree(points::Matrix{Float64})
     N, D = size(points)
     perm = collect(1:N)        # tree_pos → orig_idx (1-based)
-    seg_lo = zeros(Int, N)
-    seg_hi = zeros(Int, N)
-    split_dim = zeros(Int, N)
+    # An implicit 1-based binary tree over N points can have node indices up to 4N.
+    # Allocate with headroom to avoid silent subtree drops when child index > N.
+    max_node = 4 * N
+    seg_lo = zeros(Int, max_node)
+    seg_hi = zeros(Int, max_node)
+    split_dim = zeros(Int, max_node)
 
     # BFS queue: (node_id, range_lo, range_hi) in perm array
     queue = Vector{Tuple{Int, Int, Int}}()
@@ -102,6 +105,7 @@ function build_tree(points::Matrix{Float64})
     while qi <= length(queue)
         node, lo, hi = queue[qi]
         qi += 1
+        node > max_node && continue   # shouldn't happen, but guard
         seg_lo[node] = lo
         seg_hi[node] = hi
 
@@ -135,10 +139,10 @@ function build_tree(points::Matrix{Float64})
         mid = (lo + hi) ÷ 2
         left = 2 * node
         right = 2 * node + 1
-        if left <= N
+        if left <= max_node
             push!(queue, (left, lo, mid))
         end
-        if right <= N
+        if right <= max_node
             push!(queue, (right, mid + 1, hi))
         end
     end
@@ -152,9 +156,10 @@ end
 # Traverse the implicit k-d tree for point at tree_pos `m` (1-based) to find its k
 # nearest neighbors among tree positions 1..m-1.
 function _query_one!(heap::MaxHeap, sorted_pts::Matrix{Float64}, seg_lo::Vector{Int},
-        seg_hi::Vector{Int}, split_dim::Vector{Int}, m::Int, k::Int, N::Int)
+        seg_hi::Vector{Int}, split_dim::Vector{Int}, m::Int, k::Int)
     qpt = view(sorted_pts, m, :)  # query point (D-vector)
     D = size(sorted_pts, 2)
+    max_node = length(seg_lo)
 
     # Stack-based DFS over tree nodes.
     stack = Vector{Int}()
@@ -162,18 +167,21 @@ function _query_one!(heap::MaxHeap, sorted_pts::Matrix{Float64}, seg_lo::Vector{
 
     while !isempty(stack)
         node = pop!(stack)
-        node > N && continue
+        node > max_node && continue
         lo = seg_lo[node]
         hi = seg_hi[node]
         lo == 0 && continue  # uninitialized node (tree is not full binary)
 
         # Bounding-box pruning: compute min squared distance from qpt to the bounding box
-        # of this node's point set.
+        # of this node's point set restricted to preceding indices (< m).
+        hi_eff = min(hi, m - 1)   # only preceding points matter for pruning
+        hi_eff < lo && continue   # no preceding points in this segment
+
         min_sq = 0.0
         for d in 1:D
             mn = Inf
             mx = -Inf
-            for pi in lo:hi
+            for pi in lo:hi_eff
                 v = sorted_pts[pi, d]
                 v < mn && (mn = v)
                 v > mx && (mx = v)
@@ -206,11 +214,11 @@ function _query_one!(heap::MaxHeap, sorted_pts::Matrix{Float64}, seg_lo::Vector{
         sd = split_dim[node]
         split_val = sorted_pts[mid, sd]
         if qpt[sd] <= split_val
-            right <= N && push!(stack, right)
-            left <= N && push!(stack, left)
+            right <= max_node && push!(stack, right)
+            left <= max_node && push!(stack, left)
         else
-            left <= N && push!(stack, left)
-            right <= N && push!(stack, right)
+            left <= max_node && push!(stack, left)
+            right <= max_node && push!(stack, right)
         end
     end
 end
@@ -237,7 +245,7 @@ function query_preceding_neighbors(sorted_pts::Matrix{Float64}, seg_lo::Vector{I
         fill!(heap.dists, Inf)
         fill!(heap.idxs, 0)
 
-        _query_one!(heap, sorted_pts, seg_lo, seg_hi, split_dim, m, k, N)
+        _query_one!(heap, sorted_pts, seg_lo, seg_hi, split_dim, m, k)
 
         # Store sorted neighbors (by distance) for this point.
         col = m - n0

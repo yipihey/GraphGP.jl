@@ -64,11 +64,11 @@ println()
 println("  iter │    loss    │ variance │  scale  │  ‖g‖    │  ms/iter")
 println("  ─────┼────────────┼──────────┼─────────┼─────────┼─────────")
 
-variance = 1.0
-scale    = 0.7
-
-for iter in 1:N_ITER
-    t = @elapsed begin
+let variance = 1.0, scale = 0.7
+    local loss = 0.0
+    local gnorm = 0.0
+    for iter in 1:N_ITER
+        t0 = time_ns()
         prob = make_prob(variance, scale)
 
         # loss = -logdet(K) - 0.5*||xi||^2  (= log-likelihood up to a constant)
@@ -90,14 +90,15 @@ for iter in 1:N_ITER
         end
         variance = max(variance + STEP_SIZE * g[1], 1e-3)
         scale    = max(scale    + STEP_SIZE * g[2], 1e-3)
+        t = (time_ns() - t0) / 1e6
+
+        if iter == 1 || iter % 5 == 0 || iter == N_ITER
+            @printf("  %4d │ %10.3f │ %8.4f │ %7.4f │ %7.3f │ %6.1f\n",
+                iter, loss, variance, scale, gnorm, t)
+        end
     end
 
-    if iter == 1 || iter % 5 == 0 || iter == N_ITER
-        @printf("  %4d │ %10.3f │ %8.4f │ %7.4f │ %7.3f │ %6.1f\n",
-            iter, loss, variance, scale, gnorm, t*1000)
-    end
+    println()
+    @printf("  Final:  variance=%.4f  scale=%.4f\n", variance, scale)
+    @printf("  True:   variance=%.4f  scale=%.4f\n", TRUE_VARIANCE, TRUE_SCALE)
 end
-
-println()
-@printf("  Final:  variance=%.4f  scale=%.4f\n", variance, scale)
-@printf("  True:   variance=%.4f  scale=%.4f\n", TRUE_VARIANCE, TRUE_SCALE)
