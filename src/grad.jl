@@ -126,6 +126,37 @@ function refine_logdet_grad_vals_enzyme(prob::GraphGPProblem{T};
 end
 
 """
+    generate_logdet_grad_vals(prob; backend) -> dvals
+
+Gradient of `generate_logdet(prob)` (dense + refinement) w.r.t. `prob.vals`.
+Combines the analytic hand-written refinement adjoint with the dense-layer Cholesky gradient.
+"""
+function generate_logdet_grad_vals(prob::GraphGPProblem{T};
+        backend = KernelAbstractions.get_backend(prob)) where {T}
+    return refine_logdet_grad_vals(prob; backend = backend) .+ _dense_logdet_grad_vals(prob)
+end
+
+"""
+    generate_inv_loss_grad_vals(prob, data; backend) -> (loss, dvals)
+
+Returns `loss = 0.5 * ||generate_inv(prob, data)||^2` and its gradient w.r.t. `prob.vals`.
+`data` should be in the original (not tree/depth) ordering; reordering is handled internally.
+"""
+function generate_inv_loss_grad_vals(prob::GraphGPProblem{T}, data::AbstractVector{T};
+        backend = KernelAbstractions.get_backend(prob)) where {T}
+    n0 = prob.n0
+    data_ord = prob.indices !== nothing ? data[prob.indices] : data
+    # Dense part
+    xi_dense = generate_dense_inv(view(prob.coords, :, 1:n0), prob.scale, prob.bins, prob.vals,
+        data_ord[1:n0])
+    dense_loss = sum(abs2, xi_dense) / 2
+    g_dense = _dense_inv_loss_grad_vals(prob, data_ord[1:n0])
+    # Refinement part
+    ref_loss, g_ref = refine_inv_loss_grad_vals(prob, data_ord; backend = backend)
+    return dense_loss + ref_loss, g_dense .+ g_ref
+end
+
+"""
     refine_inv_loss_grad_vals(prob, values; backend) -> (loss, dvals)
 
 Returns the inverse-half of the GP marginal likelihood, `loss = 0.5 * sum(xi.^2)` with

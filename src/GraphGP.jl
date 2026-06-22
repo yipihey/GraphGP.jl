@@ -21,6 +21,7 @@ export cov_lookup
 export refine_logdet, refine_logdet_terms, refine_inv, refine_inv!
 export refine, refine!
 export refine_logdet_grad_vals, refine_inv_loss_grad_vals
+export generate_logdet_grad_vals, generate_inv_loss_grad_vals
 # Phase 7: kernel hyperparameter layer
 export make_cov_bins, rbf_kernel, matern_kernel, hyperparam_grad
 # Phase 8: dense first layer + orchestration
