@@ -1,6 +1,12 @@
 # Host-side drivers. These launch the per-point kernels and perform the (cheap) host-side
 # reductions. They are the public, differentiable entry points.
 
+# Workgroup size for GPU kernel launches. 64 threads/block suits our private-memory-heavy
+# kernels (~270 f32 registers per thread for K=8, D=2) better than KA's CUDA default (256),
+# which would over-subscribe registers and reduce occupancy.
+# On CPU the KA backend uses this as a task-chunk hint; the value is not critical there.
+_wgsize(backend) = backend isa KernelAbstractions.CPU ? nothing : 64
+
 """
     refine_logdet(prob; backend) -> T
 
@@ -22,7 +28,7 @@ function refine_logdet_terms(prob::GraphGPProblem{T}; backend = KernelAbstractio
     terms = KernelAbstractions.zeros(backend, T, M)
     kernel = refine_logdet_kernel!(backend)
     kernel(terms, prob.coords, prob.neighbors, prob.n0, prob.scale, prob.bins, prob.vals,
-        nbins(prob), Val(K), Val(D); ndrange = M)
+        nbins(prob), Val(K), Val(D); ndrange = M, workgroupsize = _wgsize(backend))
     KernelAbstractions.synchronize(backend)
     return terms
 end
@@ -41,7 +47,7 @@ function refine_inv!(xi_out, prob::GraphGPProblem{T}, values;
     D = ndims_space(prob)
     kernel = refine_inv_kernel!(backend)
     kernel(xi_out, prob.coords, prob.neighbors, values, prob.n0, prob.scale, prob.bins,
-        prob.vals, nbins(prob), Val(K), Val(D); ndrange = M)
+        prob.vals, nbins(prob), Val(K), Val(D); ndrange = M, workgroupsize = _wgsize(backend))
     KernelAbstractions.synchronize(backend)
     return xi_out
 end
@@ -72,8 +78,10 @@ function refine!(values, prob::GraphGPProblem{T}, xi;
     D = ndims_space(prob)
     mean_vec = KernelAbstractions.zeros(backend, T, K, M)
     std = KernelAbstractions.zeros(backend, T, M)
+    wgs = _wgsize(backend)
     refine_meanvec_std_kernel!(backend)(mean_vec, std, prob.coords, prob.neighbors, prob.n0,
-        prob.scale, prob.bins, prob.vals, nbins(prob), Val(K), Val(D); ndrange = M)
+        prob.scale, prob.bins, prob.vals, nbins(prob), Val(K), Val(D);
+        ndrange = M, workgroupsize = wgs)
     KernelAbstractions.synchronize(backend)
 
     apply = refine_apply_kernel!(backend)
@@ -82,7 +90,8 @@ function refine!(values, prob::GraphGPProblem{T}, xi;
         m_lo = offs[b - 1] - prob.n0 + 1     # first refined column (1-based) in this batch
         len = offs[b] - offs[b - 1]
         len <= 0 && continue
-        apply(values, mean_vec, std, prob.neighbors, xi, prob.n0, m_lo, Val(K); ndrange = len)
+        apply(values, mean_vec, std, prob.neighbors, xi, prob.n0, m_lo, Val(K);
+            ndrange = len, workgroupsize = wgs)
         KernelAbstractions.synchronize(backend)
     end
     return values

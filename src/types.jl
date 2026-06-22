@@ -20,12 +20,29 @@ struct GraphGPProblem{T, MC <: AbstractMatrix, MN <: AbstractMatrix, V <: Abstra
     # When built from Python/JAX, this is the `graph.indices` field.
     # Nothing means the identity permutation (points already in the desired order).
     indices::Union{Nothing, Vector{Int}}
+
+    function GraphGPProblem(coords::MC, neighbors::MN, offsets::Vector{Int}, n0::Int,
+            scale::T, bins::V, vals::V,
+            indices::Union{Nothing, Vector{Int}} = nothing) where {T, MC, MN, V}
+        # All array fields that appear in @kernel launches must reside on the same device.
+        # offsets and indices are always CPU (used in host dispatch loops only).
+        b = KernelAbstractions.get_backend(coords)
+        KernelAbstractions.get_backend(neighbors) == b ||
+            throw(ArgumentError(
+                "neighbors backend ($(KernelAbstractions.get_backend(neighbors))) ≠ " *
+                "coords backend ($b): all kernel arrays must be on the same device"))
+        KernelAbstractions.get_backend(bins) == b ||
+            throw(ArgumentError(
+                "bins backend ($(KernelAbstractions.get_backend(bins))) ≠ " *
+                "coords backend ($b): all kernel arrays must be on the same device"))
+        KernelAbstractions.get_backend(vals) == b ||
+            throw(ArgumentError(
+                "vals backend ($(KernelAbstractions.get_backend(vals))) ≠ " *
+                "coords backend ($b): all kernel arrays must be on the same device"))
+        new{T, MC, MN, V}(coords, neighbors, offsets, n0, scale, bins, vals, indices)
+    end
 end
 
-# Convenience constructors — without indices (backward-compatible).
-function GraphGPProblem(coords, neighbors, offsets, n0, scale, bins, vals)
-    return GraphGPProblem(coords, neighbors, offsets, n0, scale, bins, vals, nothing)
-end
 
 npoints(p::GraphGPProblem) = size(p.coords, 2)
 ndims_space(p::GraphGPProblem) = size(p.coords, 1)
