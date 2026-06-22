@@ -9,4 +9,5 @@ include("loadref.jl")
     include("test_interp.jl")
     include("test_linalg.jl")
     include("test_refine.jl")
+    include("test_gradients.jl")
 end

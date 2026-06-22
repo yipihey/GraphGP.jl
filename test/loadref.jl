@@ -37,6 +37,8 @@ function load_problem(name::AbstractString; T = Float32)
         cov_bins64 = Float64.(d["cov_bins64"]),
         cov_vals64 = Float64.(d["cov_vals64"]),
         grad_logdet_vals64 = Float64.(d["grad_logdet_vals64"]),
+        inv_loss64 = Float64(d["inv_loss64"]),
+        grad_inv_loss_vals64 = Float64.(d["grad_inv_loss_vals64"]),
     )
     return prob, ref
 end

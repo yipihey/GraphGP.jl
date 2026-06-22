@@ -101,6 +101,16 @@ def build_case(name, *, n_points, n_dim, n0, k, seed=137):
     grad_vals64 = jax.grad(logdet_of_vals)(cov_vals64)
     out["grad_logdet_vals64"] = np.asarray(grad_vals64, dtype=np.float64)
 
+    # Gradient of the inverse-half loss 0.5*||xi||^2 w.r.t. cov_vals (f64 oracle).
+    def inv_loss_of_vals(vals):
+        _, xi = gp.refine_inv(graph.points, graph.neighbors, graph.offsets, (cov_bins64, vals), values64)
+        return 0.5 * jnp.sum(xi ** 2)
+
+    inv_loss = inv_loss_of_vals(cov_vals64)
+    grad_inv_vals64 = jax.grad(inv_loss_of_vals)(cov_vals64)
+    out["inv_loss64"] = np.float64(inv_loss)
+    out["grad_inv_loss_vals64"] = np.asarray(grad_inv_vals64, dtype=np.float64)
+
     os.makedirs(OUTDIR, exist_ok=True)
     path = os.path.join(OUTDIR, f"{name}.npz")
     np.savez(path, **out)

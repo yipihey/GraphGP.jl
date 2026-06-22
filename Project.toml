@@ -1,13 +1,15 @@
 name = "GraphGP"
 uuid = "58493978-3208-4978-a170-e38d678289e7"
-authors = ["graphgp contributors"]
 version = "0.1.0"
+authors = ["graphgp contributors"]
 
 [deps]
+Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
 KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 
 [compat]
+Enzyme = "0.13.163"
 KernelAbstractions = "0.9"
 julia = "1.10"
 

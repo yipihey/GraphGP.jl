@@ -8,9 +8,11 @@ include("linalg.jl")
 include("types.jl")
 include("kernels.jl")
 include("api.jl")
+include("grad.jl")
 
 export GraphGPProblem
 export cov_lookup
 export refine_logdet, refine_logdet_terms, refine_inv, refine_inv!
+export refine_logdet_grad_vals, refine_inv_loss_grad_vals
 
 end # module
