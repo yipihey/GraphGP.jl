@@ -73,6 +73,21 @@ let cuda_ok = false
                 @test isapprox(Array(dv_gpu), dv_cpu, rtol = 1e-3)
             end
 
+            @testset "GPU k-NN query parity (query_preceding_neighbors_ka)" begin
+                N, D, n0, k = 4000, 3, 80, 10
+                pts = randn(MersenneTwister(321), N, D)
+                sorted_pts, seg_lo, seg_hi, split_dim, _ = build_tree(pts)
+                nb_ref = query_preceding_neighbors(sorted_pts, seg_lo, seg_hi, split_dim, n0, k)
+                spts = permutedims(sorted_pts)
+                nb_gpu = Array(query_preceding_neighbors_ka(
+                    CuArray(spts), CuArray(seg_lo), CuArray(seg_hi), CuArray(split_dim), n0, k))
+                mism = 0
+                for m in 1:(N - n0)
+                    Set(nb_gpu[:, m]) == Set(nb_ref[:, m]) || (mism += 1)
+                end
+                @test mism == 0
+            end
+
             @testset "backend consistency check" begin
                 @test_throws ArgumentError GraphGPProblem(
                     CuArray(prob_cpu.coords), prob_cpu.neighbors,  # mixed CPU/GPU

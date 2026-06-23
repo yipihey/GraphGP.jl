@@ -38,6 +38,22 @@ end
     end
 end
 
+@testset "query_preceding_neighbors_ka (CPU backend) matches scalar reference" begin
+    rng = Random.MersenneTwister(123)
+    for (N, D, n0, k) in ((500, 3, 20, 10), (1200, 2, 40, 8))
+        pts = randn(rng, N, D)
+        sorted_pts, seg_lo, seg_hi, split_dim, _ = build_tree(pts)
+        nb_ref = query_preceding_neighbors(sorted_pts, seg_lo, seg_hi, split_dim, n0, k)
+        spts = permutedims(sorted_pts)  # (D, N)
+        nb_ka = query_preceding_neighbors_ka(spts, seg_lo, seg_hi, split_dim, n0, k)
+        @test size(nb_ka) == (k, N - n0)
+        # Same k-NN *set* per query point (heap tie-order may differ).
+        for m in 1:(N - n0)
+            @test Set(nb_ka[:, m]) == Set(nb_ref[:, m])
+        end
+    end
+end
+
 @testset "build_graph smoke: valid GP structure" begin
     # Build a graph from scratch, run refine_logdet, check it's finite.
     rng = Random.MersenneTwister(99)
