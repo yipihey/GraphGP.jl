@@ -3,7 +3,12 @@
 # The scalar CPU query in tree.jl recomputes a per-node bounding box by scanning the node's
 # segment at *every* visited node (O(N) at the root → O(N²) overall). That is a fine
 # correctness reference but does not scale. Here we instead:
-#   1. precompute a static per-node AABB once (one workitem per node), and
+#   1. precompute two compact per-node record arrays — integer positions `inodes`
+#      `[lo, hi, split_dim]` (Int32) and Float32 geometry `fnodes` `[split_val, min[D], max[D]]`
+#      — read with two small contiguous fetches per node. The geometry is Float32: the A6000's
+#      f64 throughput is ~1/32 of f32, and the distance/AABB math dominates, so f32 ≈ 1.7×
+#      faster (positions stay exact Int32). For a leaf, min == max == the point coordinates, so
+#      the query needs no separate `spts` read for leaves, and
 #   2. run one workitem per query point with a private fixed-size k-best buffer and an explicit
 #      DFS stack, pruning by (a) the per-node AABB distance and (b) an index-range skip.
 # Two prunes, both exact:
@@ -24,29 +29,43 @@ using KernelAbstractions: @kernel, @index, @Const, get_backend, synchronize, zer
 
 const _QSTACK = 64   # max DFS stack depth (supports trees over up to ~2^63 points)
 
-# Per-node axis-aligned bounding box over the node's full segment (Float64 coords, D×N layout).
-@kernel function _node_aabb_kernel!(node_min, node_max, @Const(spts),
-        @Const(seg_lo), @Const(seg_hi), ::Val{D}) where {D}
+# Pack each node into one contiguous Int32 record column `rec` (RW = 4 + 2D rows):
+#   [1]=lo  [2]=hi  [3]=split_dim  [4]=split_val  [5:4+D]=min  [5+D:4+2D]=max
+# Positions (lo, hi, split_dim) are stored as Int32 (exact up to ~2.1e9 points); the geometry
+# fields (split_val, min, max) are Float32 stored via bit-reinterpret into the same Int32 array.
+# This gives one coalesced fetch per node *and* exact positions *and* fast f32 geometry math.
+# For a leaf (lo==hi) min==max==the point coordinates (no extra `spts` read). rec[1]==0 marks
+# an empty implicit node.
+@kernel function _node_pack_kernel!(rec, @Const(seg_lo), @Const(seg_hi), @Const(split_dim),
+        @Const(spts), ::Val{D}) where {D}
     node = @index(Global)
     @inbounds begin
         lo = seg_lo[node]
         if lo == 0
-            for d in 1:D
-                node_min[d, node] = Inf
-                node_max[d, node] = -Inf
-            end
+            rec[1, node] = Int32(0)
         else
             hi = seg_hi[node]
+            rec[1, node] = Int32(lo)
+            rec[2, node] = Int32(hi)
+            if lo < hi
+                sd = split_dim[node]                       # internal: split dim/value
+                rec[3, node] = Int32(sd)
+                mid = (lo + hi) >>> 1
+                rec[4, node] = reinterpret(Int32, Float32(spts[sd, mid]))
+            else
+                rec[3, node] = Int32(1)                    # leaf: split unused
+                rec[4, node] = Int32(0)
+            end
             for d in 1:D
-                mn = Inf
-                mx = -Inf
+                mn = Inf32
+                mx = -Inf32
                 for i in lo:hi
-                    v = spts[d, i]
+                    v = Float32(spts[d, i])
                     v < mn && (mn = v)
                     v > mx && (mx = v)
                 end
-                node_min[d, node] = mn
-                node_max[d, node] = mx
+                rec[4 + d, node] = reinterpret(Int32, mn)
+                rec[4 + D + d, node] = reinterpret(Int32, mx)
             end
         end
     end
@@ -55,43 +74,45 @@ end
 # One workitem per refined point t = 1..M (query tree position m = n0 + t). Finds the k
 # nearest preceding (position < m) points and writes their 1-based tree indices, ascending
 # by distance, into neighbors[:, t].
-@kernel function _query_kernel!(neighbors, @Const(spts), @Const(seg_lo), @Const(seg_hi),
-        @Const(split_dim), @Const(node_min), @Const(node_max), n0, max_node,
-        ::Val{K}, ::Val{D}) where {K, D}
+@kernel function _query_kernel!(neighbors, @Const(rec), @Const(spts),
+        n0, max_node, ::Val{K}, ::Val{D}) where {K, D}
     t = @index(Global)
     m = n0 + t
-    bd = @private Float64 (K,)     # k-best squared distances
+    bd = @private Float32 (K,)     # k-best squared distances
     bi = @private Int (K,)         # k-best point indices (1-based)
+    qp = @private Float32 (D,)     # query coordinates, cached once
     stack = @private Int (_QSTACK,)
     @inbounds begin
         for j in 1:K
-            bd[j] = Inf
+            bd[j] = Inf32
             bi[j] = 0
         end
+        for d in 1:D
+            qp[d] = Float32(spts[d, m])
+        end
         cnt = 0
-        worst = Inf
+        worst = Inf32
         sp = 1
         stack[1] = 1
         while sp >= 1
             node = stack[sp]
             sp -= 1
             (node < 1 || node > max_node) && continue
-            lo = seg_lo[node]
+            lo = Int(rec[1, node])
             lo == 0 && continue
-            # Index-range skip: points are in tree order and a node's subtree occupies the
-            # contiguous range [seg_lo, seg_hi], so seg_lo >= m means the whole subtree
-            # post-dates the query point m → no admissible preceding neighbor. This is the
-            # decisive prune for the Vecchia "preceding neighbors" constraint.
+            # Index-range skip: a node's subtree occupies the contiguous tree-order range
+            # [lo, hi], so lo >= m means the whole subtree post-dates the query point m → no
+            # admissible preceding neighbor. The decisive prune for the Vecchia constraint.
             lo >= m && continue
-            hi = seg_hi[node]
+            hi = Int(rec[2, node])
 
-            # AABB pruning (only once the buffer is full).
+            # AABB pruning (only once the buffer is full). Geometry fields are Float32 bitcast.
             if cnt == K
-                msq = 0.0
+                msq = 0.0f0
                 for d in 1:D
-                    q = spts[d, m]
-                    nmn = node_min[d, node]
-                    nmx = node_max[d, node]
+                    q = qp[d]
+                    nmn = reinterpret(Float32, rec[4 + d, node])
+                    nmx = reinterpret(Float32, rec[4 + D + d, node])
                     c = q < nmn ? nmn : (q > nmx ? nmx : q)
                     dl = c - q
                     msq += dl * dl
@@ -100,10 +121,10 @@ end
             end
 
             if lo == hi
-                (lo < m) || continue
-                sq = 0.0
+                # Leaf: min == max == the point's coordinates (from the node record).
+                sq = 0.0f0
                 for d in 1:D
-                    dv = spts[d, lo] - spts[d, m]
+                    dv = reinterpret(Float32, rec[4 + d, node]) - qp[d]
                     sq += dv * dv
                 end
                 if cnt < K
@@ -111,7 +132,7 @@ end
                     bd[cnt] = sq
                     bi[cnt] = lo
                     if cnt == K
-                        w = -Inf
+                        w = -Inf32
                         for j in 1:K
                             bd[j] > w && (w = bd[j])
                         end
@@ -128,7 +149,7 @@ end
                     end
                     bd[wp] = sq
                     bi[wp] = lo
-                    w2 = -Inf
+                    w2 = -Inf32
                     for j in 1:K
                         bd[j] > w2 && (w2 = bd[j])
                     end
@@ -140,10 +161,9 @@ end
             # Internal node: push children, nearer one last so it is popped first.
             left = 2 * node
             right = 2 * node + 1
-            mid = (lo + hi) ÷ 2
-            sd = split_dim[node]
-            splitv = spts[sd, mid]
-            qsd = spts[sd, m]
+            sd = Int(rec[3, node])
+            splitv = reinterpret(Float32, rec[4, node])
+            qsd = qp[sd]
             if qsd <= splitv
                 if right <= max_node && sp < _QSTACK
                     sp += 1
@@ -190,9 +210,12 @@ end
 Backend-agnostic k-NN query over a prebuilt k-d tree. `spts` is `(D, N)` `Float64` points in
 tree order; `seg_lo`/`seg_hi`/`split_dim` are the implicit-tree node arrays from `build_tree`
 (all on the same backend as `spts`). Returns 1-based tree-position neighbor indices in a
-`(k, M)` matrix (`M = N - n0`), matching the set produced by the scalar `query_preceding_neighbors`.
+`(k, M)` matrix (`M = N - n0`).
 
-Runs on CPU or GPU depending on the array backend (e.g. pass `CuArray`s for the GPU path).
+Distances are computed in Float32 (the geometry is packed Float32; positions stay exact
+Int32). This matches the scalar `query_preceding_neighbors` neighbor set for well-separated
+points; on near-equidistant ties the choice among them may differ (immaterial for the Vecchia
+approximation). Runs on CPU or GPU depending on the array backend (pass `CuArray`s for GPU).
 """
 function query_preceding_neighbors_ka(spts::AbstractMatrix{Float64},
         seg_lo::AbstractVector{<:Integer}, seg_hi::AbstractVector{<:Integer},
@@ -201,14 +224,18 @@ function query_preceding_neighbors_ka(spts::AbstractMatrix{Float64},
     D, N = size(spts)
     M = N - n0
     max_node = length(seg_lo)
-    node_min = ka_zeros(backend, Float64, D, max_node)
-    node_max = ka_zeros(backend, Float64, D, max_node)
-    _node_aabb_kernel!(backend)(node_min, node_max, spts, seg_lo, seg_hi, Val(D);
+    # One contiguous Int32 record per node (RW = 4 + 2D): positions exact, geometry Float32 via
+    # bit-reinterpret → a single coalesced fetch per node with fast f32 math.
+    RW = 4 + 2D
+    rec = ka_zeros(backend, Int32, RW, max_node)
+    spts32 = similar(spts, Float32)
+    copyto!(spts32, spts)
+    _node_pack_kernel!(backend)(rec, seg_lo, seg_hi, split_dim, spts, Val(D);
         ndrange = max_node, workgroupsize = _wgsize(backend))
     synchronize(backend)
     neighbors = ka_zeros(backend, Int, k, M)
-    _query_kernel!(backend)(neighbors, spts, seg_lo, seg_hi, split_dim, node_min, node_max,
-        n0, max_node, Val(k), Val(D); ndrange = M, workgroupsize = _wgsize(backend))
+    _query_kernel!(backend)(neighbors, rec, spts32, n0, max_node, Val(k), Val(D);
+        ndrange = M, workgroupsize = _wgsize(backend))
     synchronize(backend)
     return neighbors
 end

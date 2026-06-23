@@ -117,7 +117,7 @@ an arbitrary user loss), Python is more flexible.
 | GPU compute path (generate/inverse/logdet/grad) | ✅ works end-to-end; validated in CI GPU testset |
 | `to_backend` (build on CPU, run on GPU) | ✅ |
 | GPU `compute_depths` / `quantize_to_lattice` | ✅ backend-dispatched KA |
-| GPU k-NN query (`query_preceding_neighbors_ka`) | ✅ CPU+GPU; AABB + index-range skip; exact-set parity with the scalar reference (~8× faster than the first version at 200 K) |
+| GPU k-NN query (`query_preceding_neighbors_ka`) | ✅ CPU+GPU; AABB + index-range skip + Float32 packed node records; ~12× faster than the first version at 200 K (0.4 → 4.7 M pts/s) |
 | GPU `build_tree` (`build_tree_ka`) | ✅ sort-based level build (one global `sortperm`/level), CPU+GPU; valid k-d tree (brute-force-validated); ~29× faster than the CPU BFS build at 200 K |
 | GPU `order_by_depth` (`order_by_depth_ka`) | ✅ GPU `sortperm` of depths + KA scatter for the inverse permutation and neighbor remap |
 | Fully-fused on-device build (`build_graph_ka`) | ✅ tree → query → depths → reorder → quantize entirely on `backend`, returns a device-resident `GraphGPProblem` (no host round-trip). 200 K in ~340 ms, 1 M in ~2.1 s; validated by `check_graph` + generate/inverse roundtrip |
@@ -126,9 +126,12 @@ an arbitrary user loss), Python is more flexible.
 **Still open (clearly scoped follow-ups):**
 - **`d/dpoints` for the inverse-quadratic loss**, and GPU (atomic-scatter) variants of the
   point gradients (current point-gradient path is CPU/host accumulation).
-- **Query throughput**: the GPU query (~3 M pts/s) is far below the refine kernels (~150 M
-  pts/s) — per-thread tree traversal is divergence/memory bound; a warp-cooperative or
-  reordered-query scheme could close the gap (not correctness, just speed).
+- **Query throughput**: now ~4.7 M pts/s (Float32 packed records + index-range skip). Still
+  below the refine kernels (~150 M pts/s) — irregular per-query tree traversal is latency-bound
+  on dependent node reads. Diagnostics ruled out occupancy (stack-size) and coalescing
+  (record-packing); f32 precision was the effective lever. Further gains (a buffer-kd-tree /
+  query-reordering scheme) are possible but the query is not the build bottleneck (the tree
+  build dominates), so this is low priority.
 - **Sort primitive:** `build_tree_ka`/`order_by_depth_ka` use generic `sortperm`, which
   dispatches to the CUDA method at run time — so no CUDA package extension was needed to keep
   the core CUDA-free.

@@ -109,17 +109,22 @@ RTX A6000, `K=10`, `D=3`, `n0=1000`:
 
 | N | build_tree (CPU, BFS) | build_tree_ka (GPU) | GPU query |
 | --- | --- | --- | --- |
-| 50 K  | 1.7 s | — | 16 ms |
-| 100 K | — | — | 33 ms (3.0 M pts/s) |
-| 200 K | 4.4 s | **150 ms** (~29×) | 63 ms (3.1 M pts/s) |
+| 100 K | — | — | 22 ms (4.6 M pts/s) |
+| 200 K | 4.4 s | **150 ms** (~29×) | 42 ms (4.7 M pts/s) |
 | 1 M   | ~25 s | **0.90 s** | — |
 
 Reproduce: `julia --project=julia/GraphGP/bench julia/GraphGP/test/bench_build.jl 200000 10 3`.
 
-The index-range skip sped the query up ~8× at 200 K (492 ms → 63 ms); the GPU build is ~29×
-faster than the CPU BFS build at 200 K. (A tried split-plane *bound* was tighter on paper but
-the per-node AABB is in fact a tighter cell bound; the decisive win for the Vecchia
-preceding-neighbor query is the index-range skip.)
+Query throughput evolution at 200 K: 0.4 M pts/s (initial, loose AABB over all points) → 3.1
+(index-range skip: skip subtrees with no preceding points, the decisive Vecchia prune) → 4.7
+(Float32 geometry in a packed per-node record). Controlled experiments showed the query is
+neither occupancy-bound (halving the per-thread stack changed nothing) nor coalescing-bound
+(packing the node record changed nothing); the remaining lever was precision — the A6000's f64
+throughput is ~1/32 of f32, so packing the geometry as Float32 (positions kept exact as Int32)
+gave ~1.5×. Each node is read as one contiguous Int32 record `[lo, hi, split_dim, split_val,
+min(D), max(D)]` with the float fields bit-reinterpreted. (Queries run on tree-ordered points,
+so intra-warp divergence is already low — a warp-cooperative scheme was not the effective
+lever here.) The GPU build is ~29× faster than the CPU BFS build at 200 K.
 
 **Fully fused on-device build** (`build_graph_ka`: tree → query → depths → reorder → quantize,
 all on the GPU, returning a device-resident `GraphGPProblem`):
