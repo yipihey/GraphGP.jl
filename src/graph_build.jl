@@ -263,11 +263,10 @@ function build_graph(points::Matrix{Float64}, n0::Int, k::Int,
     # Step 1: build k-d tree (tree order).
     sorted_pts, seg_lo, seg_hi, split_dim, tree_perm = build_tree(points)
 
-    # Step 2: query preceding neighbors in tree order. Use the KernelAbstractions query
-    # (precomputed per-node AABBs) instead of the scalar O(N^2) reference: same neighbor sets,
-    # far cheaper, and GPU-capable when the tree arrays live on a device.
-    spts = permutedims(sorted_pts)  # (D, N)
-    neighbors = Matrix{Int}(query_preceding_neighbors_ka(spts, seg_lo, seg_hi, split_dim, n0, k))
+    # Step 2: query preceding neighbors in tree order (scalar CPU reference). For GPU builds use
+    # `query_preceding_neighbors_ka` on device arrays (see bench/bench_build.jl); the KA query is
+    # GPU-friendly but, on the KA CPU backend, slower than this scalar path.
+    neighbors = query_preceding_neighbors(sorted_pts, seg_lo, seg_hi, split_dim, n0, k)
 
     # Step 3: depth ordering.
     depths = compute_depths(neighbors, n0)

@@ -96,6 +96,27 @@ logdet at 20 M (ref ~7% ahead); it now *beats* the reference on both ops at 5 M 
 graph was, if anything, mildly pessimistic for it. Conclusions are unchanged from the
 synthetic case.
 
+## Graph construction (GPU k-NN query)
+
+The graph-build pipeline is implemented in Julia. The k-d tree skeleton (`build_tree`) is
+currently built on the CPU; the **k-NN query** (`query_preceding_neighbors_ka`) runs on the
+GPU (KernelAbstractions), validated to produce the same neighbor sets as the scalar reference.
+RTX A6000, `K=10`, `D=3`, `n0=1000`:
+
+| N | build_tree (CPU) | GPU query |
+| --- | --- | --- |
+| 50 K  | 1.7 s | 75 ms (0.65 M pts/s) |
+| 100 K | — | 185 ms |
+| 200 K | 4.4 s | 492 ms (0.4 M pts/s) |
+
+Reproduce: `julia --project=julia/GraphGP/bench julia/GraphGP/test/bench_build.jl 200000 10 3`.
+
+The GPU query is correct but **not yet throughput-optimized**: it prunes against a static
+full-segment AABB, which is loose at scale (hence ~0.5 M pts/s, far below the refine kernels'
+~150 M pts/s). A tighter split-plane bound, plus moving `build_tree`/`order_by_depth` onto the
+GPU (sort-based, in a CUDA package extension), are the planned next steps for a fully
+on-device build. See `FEATURE_COVERAGE.md` for status.
+
 ## Takeaways
 
 - **vs the reference CUDA extension (the bar to beat):** GraphGP.jl **matches it at scale**
