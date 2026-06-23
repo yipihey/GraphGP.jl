@@ -116,6 +116,20 @@ let cuda_ok = false
                 @test mism == 0
             end
 
+            @testset "GPU fused build_graph_ka: on-device build + roundtrip" begin
+                N, D, n0, k = 5000, 3, 100, 10
+                pts = randn(MersenneTwister(4), N, D)
+                bins, vals = rbf_kernel(1.0, 0.4, 1e-4, 1e1, 300; jitter = 1e-3)
+                prob = build_graph_ka(CuArray(pts), n0, k, CuArray(bins), CuArray(vals);
+                    backend = CUDABackend())
+                @test prob.coords isa CuArray            # device-resident problem
+                @test check_graph(prob) === nothing
+                xi = CuArray(randn(N))
+                xib = Array(generate_inv(prob, generate(prob, xi)))
+                @test isapprox(xib, Array(xi); rtol = 1e-8, atol = 1e-10)
+                @test isfinite(generate_logdet(prob))
+            end
+
             @testset "GPU end-to-end: build on CPU, run on GPU (to_backend)" begin
                 rng = MersenneTwister(77)
                 N, D, n0, k = 1500, 3, 40, 8

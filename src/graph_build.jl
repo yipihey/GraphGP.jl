@@ -285,3 +285,95 @@ function build_graph(points::Matrix{Float64}, n0::Int, k::Int,
     return GraphGPProblem(coords, neighbors, offsets, n0_final, eltype(vals)(scale),
         bins, vals, tree_perm)
 end
+
+# ── GPU/KA depth reordering + fused on-device build ───────────────────────────────────────
+
+# inv_sp[sort_perm[i]] = i  (inverse permutation via scatter).
+@kernel function _invperm_kernel!(inv_sp, @Const(sort_perm))
+    i = @index(Global)
+    @inbounds inv_sp[sort_perm[i]] = i
+end
+
+# Remap each refined point's neighbor indices from old (tree) positions to new (depth-sorted)
+# positions, writing into the new column m_new. inv_sp is a bijection so writes never collide.
+@kernel function _remap_neighbors_kernel!(new_nb, @Const(old_nb), @Const(inv_sp),
+        n0_old, n0_new, ::Val{K}) where {K}
+    m_old = @index(Global)
+    @inbounds begin
+        new_pos = inv_sp[n0_old + m_old]
+        m_new = new_pos - n0_new
+        if m_new >= 1
+            for ki in 1:K
+                onb = old_nb[ki, m_old]
+                new_nb[ki, m_new] = onb > 0 ? inv_sp[onb] : zero(eltype(new_nb))
+            end
+        end
+    end
+end
+
+"""
+    order_by_depth_ka(spts, perm, neighbors, depths; backend) -> (spts, perm, neighbors, depths)
+
+Backend-agnostic `order_by_depth`: reorder `(D, N)` points / `perm` / `(K, N)` `depths` by
+non-decreasing depth and remap the `(K, M)` neighbor indices to the new positions. Uses a GPU
+`sortperm` and KA scatter kernels; runs on CPU or GPU per the array backend.
+"""
+function order_by_depth_ka(spts::AbstractMatrix, perm::AbstractVector,
+        neighbors::AbstractMatrix, depths::AbstractVector;
+        backend = KernelAbstractions.get_backend(spts))
+    N = length(perm)
+    K, M = size(neighbors)
+    n0_old = N - M
+    sort_perm = sortperm(depths)                      # GPU sort when on device
+    inv_sp = similar(sort_perm)
+    _invperm_kernel!(backend)(inv_sp, sort_perm; ndrange = N, workgroupsize = _wgsize(backend))
+    KernelAbstractions.synchronize(backend)
+    sorted_spts = spts[:, sort_perm]
+    sorted_perm = perm[sort_perm]
+    sorted_depths = depths[sort_perm]
+    n0_new = Int(sum(sorted_depths .== 0))
+    new_nb = KernelAbstractions.zeros(backend, eltype(neighbors), K, N - n0_new)
+    _remap_neighbors_kernel!(backend)(new_nb, neighbors, inv_sp, n0_old, n0_new, Val(K);
+        ndrange = M, workgroupsize = _wgsize(backend))
+    KernelAbstractions.synchronize(backend)
+    return sorted_spts, sorted_perm, new_nb, sorted_depths
+end
+
+"""
+    build_graph_ka(points, n0, k, bins, vals; backend, lattice_bits=21) -> GraphGPProblem
+
+Fully on-device (or KA-CPU) graph build: k-d tree (`build_tree_ka`), preceding-neighbor query
+(`query_preceding_neighbors_ka`), depths (`compute_depths`), depth reordering
+(`order_by_depth_ka`) and lattice quantization, all on `backend`, returning a
+`GraphGPProblem` whose device arrays live on `backend`. `points` is `(N, D)`; pass a `CuMatrix`
+(and `backend = CUDABackend()`) for the GPU pipeline. `offsets`/`indices` are host data.
+
+Unlike the CPU `build_graph`, the sort-based tree is not byte-identical to the BFS tree
+(tie-breaking + fractional sort key), but it is a valid k-d tree and yields an equivalent
+Vecchia graph (validated by `check_graph` + brute-force k-NN).
+"""
+function build_graph_ka(points::AbstractMatrix, n0::Int, k::Int,
+        bins::AbstractVector, vals::AbstractVector;
+        backend = KernelAbstractions.get_backend(points), lattice_bits::Int = 21)
+    N = size(points, 1)
+    @assert n0 < N "n0 must be less than N"
+    @assert k > 0 "k must be positive"
+
+    ptsT = permutedims(points)                              # (D, N) on backend
+    spts, seg_lo, seg_hi, split_dim, perm = build_tree_ka(ptsT; backend = backend)
+    neighbors = query_preceding_neighbors_ka(spts, seg_lo, seg_hi, split_dim, n0, k;
+        backend = backend)
+    depths = compute_depths(neighbors, n0)
+    spts, perm, neighbors, depths = order_by_depth_ka(spts, perm, neighbors, depths;
+        backend = backend)
+    n0_final = Int(sum(depths .== 0))
+
+    coords_nd, _, scale = quantize_to_lattice(permutedims(spts), lattice_bits)  # (N, D) UInt32
+    coords = permutedims(coords_nd)                         # (D, N)
+    offsets = _compute_offsets(Array(depths))               # host dispatch data
+
+    bins_b = _move_to_backend(bins, backend)
+    vals_b = _move_to_backend(vals, backend)
+    return GraphGPProblem(coords, neighbors, offsets, n0_final, eltype(vals)(scale),
+        bins_b, vals_b, Array(perm))
+end

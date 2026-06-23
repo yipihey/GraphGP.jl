@@ -167,6 +167,20 @@ end
     @test C == C2
 end
 
+@testset "build_graph_ka (CPU backend): valid graph + roundtrip" begin
+    rng = Random.MersenneTwister(4)
+    N, D, n0, k = 1000, 3, 50, 8
+    pts = randn(rng, N, D)
+    bins, vals = rbf_kernel(Float64(1.0), Float64(0.4), 1e-4, 1e1, 300; jitter = Float64(1e-3))
+    prob = build_graph_ka(pts, n0, k, bins, vals)
+    @test npoints(prob) == N
+    @test nneighbors(prob) == k
+    @test check_graph(prob) === nothing                  # valid Vecchia structure
+    xi = randn(rng, N)
+    @test isapprox(generate_inv(prob, generate(prob, xi)), xi; rtol = 1e-8, atol = 1e-10)
+    @test isfinite(generate_logdet(prob))
+end
+
 @testset "build_graph generate/generate_inv roundtrip" begin
     rng = Random.MersenneTwister(55)
     N, D, n0, k = 150, 2, 15, 6

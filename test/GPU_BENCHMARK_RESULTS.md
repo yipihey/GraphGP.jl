@@ -119,8 +119,20 @@ Reproduce: `julia --project=julia/GraphGP/bench julia/GraphGP/test/bench_build.j
 The index-range skip sped the query up ~8× at 200 K (492 ms → 63 ms); the GPU build is ~29×
 faster than the CPU BFS build at 200 K. (A tried split-plane *bound* was tighter on paper but
 the per-node AABB is in fact a tighter cell bound; the decisive win for the Vecchia
-preceding-neighbor query is the index-range skip.) Remaining: GPU `order_by_depth` and a fully
-fused on-device `build_graph` orchestration — see `FEATURE_COVERAGE.md`.
+preceding-neighbor query is the index-range skip.)
+
+**Fully fused on-device build** (`build_graph_ka`: tree → query → depths → reorder → quantize,
+all on the GPU, returning a device-resident `GraphGPProblem`):
+
+| N | build_graph_ka (GPU, end-to-end) |
+| --- | --- |
+| 200 K | **0.34 s** |
+| 1 M | **2.1 s** |
+
+(The CPU `build_graph` is tens of seconds at 200 K — `build_tree` alone is 4.4 s plus the
+scalar O(N²) query.) Validated by `check_graph` + generate/inverse roundtrip. So
+`build_graph_ka(CuArray(points), …) → generate/refine/gradients` runs end-to-end on the GPU
+with no Python and no host round-trip.
 
 ## Takeaways
 
