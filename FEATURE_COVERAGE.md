@@ -4,13 +4,25 @@ Audit of whether the Julia rewrite (`julia/GraphGP/`) covers the capabilities of
 reference Python/JAX package (`graphgp/`). Date: 2026-06. Based on a function-by-function
 inventory of both source trees.
 
-**Headline:** the numeric core (forward generation, inverse, logdet — both the dense first
-layer and the Vecchia refinement, plus the `generate*` orchestration) is at **full parity**,
-and the graph-construction pipeline (`build_tree`/`query_preceding_neighbors`/`compute_depths`/
-`order_by_depth`/`build_graph`) is **also implemented in Julia** (CPU). GraphGP.jl actually
-*exceeds* Python on differentiation (hand-written CPU+GPU analytic adjoints where Python only
-has slow JAX autodiff, and none in the CUDA extension). The real gaps are: general-purpose
-differentiability, GPU graph construction, and a few utility/validation functions.
+> **Update (2026-06, post-implementation).** Most gaps from the original audit are now closed:
+> `check_graph` and `compute_cov_matrix` are implemented; differentiability is exposed via
+> `ChainRulesCore.rrule`s (`logdet_of_vals`, `inv_quadratic_loss_of_vals`) and now also covers
+> `d/dxi` (`generate_grad_xi`, exact) and `d/dpoints` (`generate_logdet_grad_points`, validated
+> vs finite differences); and the GPU compute path now runs end-to-end (`generate`/inverse/
+> logdet/gradients on GPU, `to_backend`, GPU `compute_depths`/`quantize`, and a
+> backend-agnostic k-NN query `query_preceding_neighbors_ka`). A latent 2× error in the dense
+> first-layer logdet gradient was found and fixed in the process. **Remaining:** GPU
+> `build_tree`/`order_by_depth` (the k-d tree skeleton is still built on the CPU), and the
+> `d/dpoints` path for the inverse-quadratic loss. See "Status after implementation" below.
+
+**Headline (original):** the numeric core (forward generation, inverse, logdet — both the dense
+first layer and the Vecchia refinement, plus the `generate*` orchestration) is at **full
+parity**, and the graph-construction pipeline (`build_tree`/`query_preceding_neighbors`/
+`compute_depths`/`order_by_depth`/`build_graph`) is **also implemented in Julia** (CPU).
+GraphGP.jl actually *exceeds* Python on differentiation (hand-written CPU+GPU analytic adjoints
+where Python only has slow JAX autodiff, and none in the CUDA extension). The real gaps are:
+general-purpose differentiability, GPU graph construction, and a few utility/validation
+functions.
 
 ## Coverage matrix (Python public API → Julia)
 
@@ -91,3 +103,33 @@ an arbitrary user loss), Python is more flexible.
    AD path (e.g. via ChainRules/Enzyme rules on the public entry points) if broader AD is a goal.
 4. (Larger) GPU graph construction, if Julia is to own the end-to-end pipeline at scale.
 5. (Minor) public `compute_cov_matrix` for parity/debugging.
+
+## Status after implementation
+
+| Item | Status |
+| --- | --- |
+| `check_graph` | ✅ implemented + tested (`graph_build.jl`) |
+| `compute_cov_matrix` | ✅ implemented + tested (`dense.jl`) |
+| README stale claim | ✅ corrected; Differentiability section added |
+| AD: ChainRules over `cov_vals`/hyperparameters | ✅ `logdet_of_vals`, `inv_quadratic_loss_of_vals` rrules (Zygote-composable) |
+| AD: `d/dxi` | ✅ `generate_grad_xi` + `generate` rrule (exact; adjoint identity to machine ε) |
+| AD: `d/dpoints` (logdet) | ✅ `generate_logdet_grad_points` (validated vs continuous FD) |
+| GPU compute path (generate/inverse/logdet/grad) | ✅ works end-to-end; validated in CI GPU testset |
+| `to_backend` (build on CPU, run on GPU) | ✅ |
+| GPU `compute_depths` / `quantize_to_lattice` | ✅ backend-dispatched KA |
+| GPU k-NN query (`query_preceding_neighbors_ka`) | ✅ CPU+GPU, exact-set parity with the scalar reference |
+| Latent dense-logdet-gradient 2× bug | ✅ found and fixed (was untested against truth) |
+
+**Still open (clearly scoped follow-ups):**
+- **GPU `build_tree` / `order_by_depth`** — the k-d tree skeleton + depth reordering still run
+  on the CPU; the GPU path builds the tree on the host, then runs query/depths/quantize on the
+  device and returns a device-resident `GraphGPProblem` (so the *dominant* query cost and all
+  compute are on GPU). A from-scratch sort-based GPU `build_tree` (mirroring the data-parallel
+  JAX `_build_tree`, with `sort!`/`sortperm` in a `CUDA` package extension) is the remaining
+  piece for a 100%-on-device build. Note GPU graph construction will not be byte-identical to
+  the CPU tree (f32 sort keys / tie handling), so validate by neighbor-set/equivalent-GP rather
+  than exact match.
+- **`d/dpoints` for the inverse-quadratic loss**, and GPU (atomic-scatter) variants of the
+  point gradients (current point-gradient path is CPU/host accumulation).
+- **CUDA package extension** to host the GPU sort primitives once `build_tree`/`order_by_depth`
+  move to the device (keeps the core CUDA-free).
