@@ -1,5 +1,6 @@
 using GraphGP
 using KernelAbstractions
+using LinearAlgebra
 using Random
 using Test
 using ForwardDiff

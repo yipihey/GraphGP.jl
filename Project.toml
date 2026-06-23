@@ -5,6 +5,7 @@ authors = ["graphgp contributors"]
 
 [deps]
 Atomix = "a9b6321e-bd34-4604-b9c9-b65b8de01458"
+ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
 Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
 ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
 KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
@@ -13,6 +14,7 @@ SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
 
 [compat]
 Atomix = "0.1, 1"
+ChainRulesCore = "1"
 Enzyme = "0.13.163"
 ForwardDiff = "0.10"
 KernelAbstractions = "0.9"
@@ -24,6 +26,7 @@ ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
 NPZ = "15e1cf62-19b3-5cfa-8e77-841668bca605"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
 
 [targets]
-test = ["Test", "Random", "NPZ", "ForwardDiff"]
+test = ["Test", "Random", "NPZ", "ForwardDiff", "Zygote"]

@@ -72,6 +72,54 @@ end
     @test isfinite(ld)
 end
 
+@testset "check_graph: valid passes, malformed throws" begin
+    rng = Random.MersenneTwister(7)
+    N, D, n0, k = 250, 3, 25, 6
+    pts = randn(rng, N, D)
+    bins, vals = rbf_kernel(Float64(1.0), Float64(0.4), 1e-4, 1e1, 200; jitter = Float64(1e-3))
+    prob = build_graph(pts, n0, k, bins, vals)
+
+    @test check_graph(prob) === nothing  # a freshly built graph is valid
+
+    # Wrong n0 (offsets[1] != n0).
+    bad_n0 = GraphGPProblem(prob.coords, prob.neighbors, prob.offsets, prob.n0 + 1,
+        prob.scale, prob.bins, prob.vals, prob.indices)
+    @test_throws ArgumentError check_graph(bad_n0)
+
+    # Non-monotone offsets.
+    bad_off = copy(prob.offsets)
+    if length(bad_off) >= 3
+        bad_off[2], bad_off[3] = bad_off[3], bad_off[2]
+        prob_bo = GraphGPProblem(prob.coords, prob.neighbors, bad_off, prob.n0,
+            prob.scale, prob.bins, prob.vals, prob.indices)
+        @test_throws ArgumentError check_graph(prob_bo)
+    end
+
+    # Break batch causality: point a neighbor of the first refined point at a later position.
+    bad_nb = copy(prob.neighbors)
+    bad_nb[1, 1] = N  # neighbor at the very end → not preceding / wrong batch
+    prob_bn = GraphGPProblem(prob.coords, bad_nb, prob.offsets, prob.n0,
+        prob.scale, prob.bins, prob.vals, prob.indices)
+    @test_throws ArgumentError check_graph(prob_bn)
+end
+
+@testset "compute_cov_matrix: symmetric, correct diagonal" begin
+    rng = Random.MersenneTwister(11)
+    N, D, n0, k = 80, 3, 10, 5
+    pts = randn(rng, N, D)
+    bins, vals = rbf_kernel(Float64(2.0), Float64(0.5), 1e-4, 1e1, 300; jitter = Float64(1e-3))
+    prob = build_graph(pts, n0, k, bins, vals)
+    C = compute_cov_matrix(prob)
+    @test size(C) == (N, N)
+    @test C ≈ transpose(C)
+    # Diagonal is the r=0 covariance (variance * (1 + jitter)).
+    @test all(isapprox.(LinearAlgebra.diag(C), vals[1]; rtol = 1e-6))
+    # Cross form matches the full form.
+    coords = Array(prob.coords)
+    C2 = compute_cov_matrix(coords, coords, prob.scale, Array(prob.bins), Array(prob.vals))
+    @test C == C2
+end
+
 @testset "build_graph generate/generate_inv roundtrip" begin
     rng = Random.MersenneTwister(55)
     N, D, n0, k = 150, 2, 15, 6

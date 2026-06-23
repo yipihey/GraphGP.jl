@@ -19,3 +19,31 @@
     nz2 = findall(!=(0), ref.grad_inv_loss_vals64)
     @test isapprox(g_inv[nz2], ref.grad_inv_loss_vals64[nz2]; rtol = 1e-4, atol = 1e-7)
 end
+
+@testset "ChainRules / Zygote composition" begin
+    using Zygote
+    prob, ref = load_problem("small"; T = Float64)
+    vals = Array(prob.vals)
+    data = ref.values64
+
+    # (1) Arbitrary scalar loss through the rrules, differentiated by Zygote w.r.t. cov_vals,
+    #     must equal the validated analytic gradients (sum of the two likelihood terms).
+    L(v) = logdet_of_vals(prob, v) + inv_quadratic_loss_of_vals(prob, v, data)
+    gz = Zygote.gradient(L, vals)[1]
+    g_ref = generate_logdet_grad_vals(prob) .+ generate_inv_loss_grad_vals(prob, data)[2]
+    @test isapprox(gz, g_ref; rtol = 1e-8, atol = 1e-10)
+
+    # logdet term alone matches its analytic adjoint exactly.
+    gz_ld = Zygote.gradient(v -> logdet_of_vals(prob, v), vals)[1]
+    @test isapprox(gz_ld, generate_logdet_grad_vals(prob); rtol = 1e-10)
+
+    # (2) Hyperparameter chaining: a Zygote-safe scalar kernel param α scaling the cov_vals.
+    #     d/dα of the loss must equal dot(analytic cov_vals grad at α·base, base).
+    base = copy(vals)
+    α0 = 1.0
+    gα = Zygote.gradient(α -> logdet_of_vals(prob, α .* base), α0)[1]
+    probα = GraphGPProblem(prob.coords, prob.neighbors, prob.offsets, prob.n0, prob.scale,
+        prob.bins, α0 .* base, prob.indices)
+    gα_ref = sum(generate_logdet_grad_vals(probα) .* base)
+    @test isapprox(gα, gα_ref; rtol = 1e-6)
+end

@@ -35,6 +35,43 @@ function _assemble_dense_cov(coords::AbstractMatrix{UInt32}, scale::T,
 end
 
 """
+    compute_cov_matrix(coords_a, coords_b, scale, bins, vals) -> Matrix
+    compute_cov_matrix(prob::GraphGPProblem) -> Matrix
+
+Dense cross-covariance between two coordinate sets `coords_a` (D×nₐ) and `coords_b` (D×n_b)
+on the integer lattice, using the same integer-distance + `cov_lookup` interpolation as the
+KA kernels. Returns an `nₐ × n_b` matrix. The single-argument form returns the full `N × N`
+covariance for all points in `prob` (debugging/reference path; `O(N²)`). Mirrors
+`graphgp.compute_cov_matrix`.
+"""
+function compute_cov_matrix(coords_a::AbstractMatrix{UInt32}, coords_b::AbstractMatrix{UInt32},
+        scale::T, bins::AbstractVector, vals::AbstractVector) where {T}
+    nb = length(bins)
+    D = size(coords_a, 1)
+    size(coords_b, 1) == D || throw(ArgumentError("coordinate dimension mismatch"))
+    na = size(coords_a, 2)
+    nbpts = size(coords_b, 2)
+    Kmat = Matrix{T}(undef, na, nbpts)
+    @inbounds for j in 1:nbpts
+        for i in 1:na
+            sq = zero(Int64)
+            for d in 1:D
+                di = Int64(coords_a[d, i]) - Int64(coords_b[d, j])
+                sq += di * di
+            end
+            r = sqrt(T(sq)) * scale
+            Kmat[i, j] = cov_lookup(r, bins, vals, nb)
+        end
+    end
+    return Kmat
+end
+
+function compute_cov_matrix(prob::GraphGPProblem)
+    coords = Array(prob.coords)
+    return compute_cov_matrix(coords, coords, prob.scale, Array(prob.bins), Array(prob.vals))
+end
+
+"""
     generate_dense(coords, scale, bins, vals, xi) -> Vector{T}
 
 Sample the first n0 = length(xi) points from the dense GP: returns `L * xi` where

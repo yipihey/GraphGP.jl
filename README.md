@@ -1,16 +1,17 @@
 # GraphGP.jl
 
-A Julia rewrite of the performance-critical numeric core of
+A standalone Julia rewrite of
 [graphgp](../../README.md) (scalable Gaussian processes via a Vecchia /
 nearest-neighbor-graph approximation), using
 [KernelAbstractions.jl](https://github.com/JuliaGPU/KernelAbstractions.jl) for
-backend-agnostic CPU + GPU kernels and (planned)
-[Enzyme.jl](https://github.com/EnzymeAD/Enzyme.jl) for differentiability.
+backend-agnostic CPU + GPU kernels, hand-written analytic adjoints, and
+[ChainRulesCore](https://github.com/JuliaDiff/ChainRulesCore.jl) for composable
+differentiability.
 
-The k-d tree build, neighbor query and depth ordering stay in the Python/JAX side. This
-package consumes a **prebuilt graph** and owns only the hot per-point inner loop: assemble
-each `(k+1)×(k+1)` covariance on the fly, factorize it, and emit the per-point scalar — the
-work that dominates runtime when the number of points `M = N − n0` reaches the billions.
+The package implements the **entire pipeline in Julia** — k-d tree build, neighbor query,
+depth ordering, and the hot per-point inner loop (assemble each `(k+1)×(k+1)` covariance on the
+fly, factorize it, emit the per-point scalar) — with no Python/JAX dependency. The inner loop
+dominates runtime when the number of refined points `M = N − n0` reaches the billions.
 
 ## Design choices
 
@@ -21,21 +22,40 @@ work that dominates runtime when the number of points `M = N − n0` reaches the
   in `Int64` and are cast to `Float32` only at the `sqrt` → kernel-lookup step.
 - **One workitem per point.** With `k ≈ 10` the per-point matrix is ~`11×11`, kept in private
   memory; the full `(M, k+1, k+1)` tensor is never materialized (the memory win over JAX).
-- **Gradients w.r.t. `cov_vals` only.** Coordinates are fixed integer data, so the only
-  differentiable input is the discretized covariance (the kernel hyperparameters).
+- **Backend-agnostic, CUDA-free core.** The package has no hard CUDA dependency; GPU support is
+  selected automatically from `CuArray` inputs (KernelAbstractions), with the few GPU-specific
+  primitives (`sortperm`/`sort!` in the graph build) provided by a `CUDA` package extension.
 
-## Implemented (validated against JAX on CPU)
+## Implemented
 
 | Routine | Status |
 | --- | --- |
-| `refine_logdet` | ✅ forward |
-| `refine_inv` / `refine_inv!` | ✅ forward |
-| `refine` / `refine!` | ✅ forward generation (sequential depth-batch scan) |
-| `refine_logdet_grad_vals` | ✅ hand-written reverse-mode adjoint (CPU threaded / GPU atomic) |
-| `refine_inv_loss_grad_vals` | ✅ Enzyme gradient of `0.5‖xi‖²` |
+| `build_tree` / `query_preceding_neighbors` / `compute_depths` / `order_by_depth` / `build_graph` | ✅ graph construction in Julia (CPU; GPU build in progress) |
+| `check_graph` | ✅ graph-invariant validator |
+| `generate` / `generate_inv` / `generate_logdet` (+ `*_dense`) | ✅ forward / inverse / logdet (dense first layer + Vecchia refine) |
+| `refine` / `refine!`, `refine_inv` / `refine_inv!`, `refine_logdet` | ✅ per-point kernels (CPU + GPU) |
+| `compute_cov_matrix` | ✅ dense reference covariance builder |
+| `refine_logdet_grad_vals`, `refine_inv_loss_grad_vals` (+ `generate_*`) | ✅ hand-written reverse-mode adjoints (CPU threaded / GPU atomic) |
 
 The hand-written logdet gradient is cross-checked against an Enzyme-through-KA reference
 (`refine_logdet_grad_vals_enzyme`) and the JAX f64 oracle.
+
+## Differentiability
+
+Gradients are provided by hand-written analytic adjoints (not generic autodiff), exposed as
+`ChainRulesCore.rrule`s so any reverse-mode AD framework (e.g. Zygote) can compose them for an
+**arbitrary scalar loss**:
+
+- **w.r.t. the discretized covariance `cov_vals`** — for `logdet` and the inverse quadratic
+  form `0.5‖xi‖²`; chains to kernel hyperparameters via `hyperparam_grad`.
+- **w.r.t. the white-noise parameters `xi`** — `generate`/`refine` are linear in `xi`, so the
+  VJP is exact and cheap.
+- **w.r.t. point positions** — supported through a continuous (dequantized) coordinate path;
+  the integer lattice is treated straight-through (gradients are w.r.t. the dequantized
+  positions, consistent with the forward value).
+
+The fast forward path is unchanged (integer lattice); the point-gradient path uses float
+positions only when point derivatives are requested.
 
 ## Benchmarks (CPU)
 
@@ -54,6 +74,11 @@ targets CUDA.jl — GPU validation runs on hardware with a GPU, not available in
 
 Reproduce: `julia -t auto --project=julia/GraphGP julia/GraphGP/test/bench.jl 200000 10 3`
 and `python julia/GraphGP/test/bench_jax.py 200000 10 3`.
+
+GPU benchmarks (GraphGP.jl vs JAX vs the custom `graphgp-cuda` reference, on an RTX A6000)
+live in [`test/GPU_BENCHMARK_RESULTS.md`](test/GPU_BENCHMARK_RESULTS.md); they run from the
+dedicated environment in `bench/` (`julia --project=julia/GraphGP/bench …`) so the package
+itself stays CUDA-free.
 
 ## Usage
 

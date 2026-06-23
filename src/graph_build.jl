@@ -1,6 +1,60 @@
 # Graph build pipeline: build_graph produces a GraphGPProblem directly from float points,
 # removing the Python dependency for graph construction.
-# Matches graphgp/graph.py: build_graph, compute_depths, order_by_depth.
+# Matches graphgp/graph.py: build_graph, compute_depths, order_by_depth, check_graph.
+
+"""
+    check_graph(prob::GraphGPProblem)
+
+Validate that the graph satisfies the invariants the refinement kernels rely on:
+
+1. `offsets[1] == n0` — the first batch is the dense/initial set, and `n0 == N - M`.
+2. `offsets` is non-decreasing and `offsets[end] ≤ N`.
+3. Topological order: every neighbor precedes its point (`max(neighbors[:,m]) < n0 + m`).
+4. Batch causality: no point has a neighbor in its own (or a later) depth batch, so a batch
+   can be generated fully in parallel.
+
+Throws `ArgumentError` on the first violation, mirroring the asserts in
+`graphgp/graph.py:check_graph`. `neighbors` is `(K, M)` 1-based; `offsets` are 1-based
+exclusive batch ends with `offsets[1] = n0` and `offsets[end] = N`.
+"""
+function check_graph(prob::GraphGPProblem)
+    N = npoints(prob)
+    M = nrefined(prob)
+    n0 = prob.n0
+    offs = prob.offsets
+
+    isempty(offs) && throw(ArgumentError("offsets is empty"))
+    offs[1] == n0 || throw(ArgumentError(
+        "offsets[1] ($(offs[1])) must equal n0 ($n0)"))
+    n0 == N - M || throw(ArgumentError(
+        "n0 ($n0) must equal npoints - nrefined ($(N - M))"))
+    for b in 2:length(offs)
+        offs[b] >= offs[b - 1] || throw(ArgumentError(
+            "offsets must be non-decreasing (offsets[$b]=$(offs[b]) < offsets[$(b-1)]=$(offs[b-1]))"))
+    end
+    offs[end] <= N || throw(ArgumentError(
+        "offsets[end] ($(offs[end])) must be ≤ npoints ($N)"))
+
+    # Pull neighbors to the host for validation (this is an explicit, non-hot check).
+    nb = Array(prob.neighbors)
+    K = size(nb, 1)
+    for m in 1:M
+        p = n0 + m                          # 1-based position of this refined point
+        mx = 0
+        @inbounds for ki in 1:K
+            v = nb[ki, m]
+            v > mx && (mx = v)
+        end
+        mx < p || throw(ArgumentError(
+            "point at position $p has neighbor $mx that does not precede it (not topological)"))
+        bi = searchsortedfirst(offs, p)     # batch whose exclusive end is ≥ p
+        prev_end = bi >= 2 ? offs[bi - 1] : 0
+        mx <= prev_end || throw(ArgumentError(
+            "point at position $p has a neighbor ($mx) in its own batch " *
+            "(batch ends at $(offs[bi])); neighbors must be in earlier batches"))
+    end
+    return nothing
+end
 
 """
     compute_depths(neighbors, n0) -> Vector{Int}
