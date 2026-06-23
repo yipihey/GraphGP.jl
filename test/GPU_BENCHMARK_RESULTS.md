@@ -19,6 +19,7 @@ A benchmark-driven optimization pass. Before → after at N=1M (K=10, D=3, f32):
 | `refine_logdet` | 160 M pts/s | **180 M pts/s** | +12% |
 | `refine_inv` | 142 M pts/s | **154 M pts/s** | +8% |
 | `query_preceding_neighbors_ka` | 4.7 M pts/s (200K) | **25.9 M pts/s (200K)** | **5.5×** |
+| `refine_logdet_grad_vals` | 40 M pts/s | **57 M pts/s** | +44% |
 | `refine_logdet_grad_points` (GPU) | 31 M pts/s | **27 M pts/s** ¹ | wg=256 |
 | `build_graph_ka` end-to-end | 1.38 s | **1.00 s** | −28% |
 
@@ -35,10 +36,14 @@ Levers (each measured):
 ¹ point-grad throughput is similar at wg=256 vs the previous 64; the win is over the wg=32
 default the other kernels use (33.7→38 M/s at K=10), and it remains ~167× over the CPU host path.
 
-Gradient w.r.t. `cov_vals` (~40 M pts/s) was diagnosed as ~50% analytic-Cholesky-pullback
-compute and ~50% off-diagonal atomic scatter into the small `d_vals` (the diagonal is already
-coalesced to one atomic/point). A shared-memory block histogram could recover much of the
-scatter half (best case ~1.5×) — a documented, bounded future option.
+- **Shared-memory histogram** for the cov_vals gradient scatter. The grad was ~50%
+  analytic-Cholesky-pullback compute and ~50% off-diagonal atomic scatter into the small
+  `d_vals` (global atomic contention; the diagonal is already coalesced to one atomic/point).
+  Each block (W=256) now accumulates into a localmem histogram with shared atomics and flushes
+  once to `d_vals`, cutting global atomics ~W× → `refine_logdet_grad_vals` 40 → 57 M pts/s
+  (+44%), same lift for the fused and inverse-loss gradients. Generic in `T` (f32 production
+  fast; the f64 oracle stays exact — the two-stage accumulation is actually more accurate than
+  the all-global atomic order). `nbins > 2048` falls back to the direct-atomic kernels.
 
 Three implementations compared:
 1. **GraphGP.jl** — KernelAbstractions/CUDA.jl, one workitem per point, matrix in private memory.
