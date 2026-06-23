@@ -118,7 +118,7 @@ an arbitrary user loss), Python is more flexible.
 | `to_backend` (build on CPU, run on GPU) | ✅ |
 | GPU `compute_depths` / `quantize_to_lattice` | ✅ backend-dispatched KA |
 | GPU k-NN query (`query_preceding_neighbors_ka`) | ✅ CPU+GPU; AABB + index-range skip + Float32 packed node records; ~12× faster than the first version at 200 K (0.4 → 4.7 M pts/s) |
-| GPU `build_tree` (`build_tree_ka`) | ✅ sort-based level build (one global `sortperm`/level), CPU+GPU; valid k-d tree (brute-force-validated); ~29× faster than the CPU BFS build at 200 K |
+| GPU `build_tree` (`build_tree_ka`) | ✅ sort-based level build (round-robin split dim; one global `sortperm`/level), CPU+GPU; valid k-d tree (brute-force-validated); ~110× faster than the CPU BFS build at 200 K (39 ms), sort-bound |
 | GPU `order_by_depth` (`order_by_depth_ka`) | ✅ GPU `sortperm` of depths + KA scatter for the inverse permutation and neighbor remap |
 | Fully-fused on-device build (`build_graph_ka`) | ✅ tree → query → depths → reorder → quantize entirely on `backend`, returns a device-resident `GraphGPProblem` (no host round-trip). 200 K in ~340 ms, 1 M in ~2.1 s; validated by `check_graph` + generate/inverse roundtrip |
 | Latent dense-logdet-gradient 2× bug | ✅ found and fixed (was untested against truth) |

@@ -110,8 +110,17 @@ RTX A6000, `K=10`, `D=3`, `n0=1000`:
 | N | build_tree (CPU, BFS) | build_tree_ka (GPU) | GPU query |
 | --- | --- | --- | --- |
 | 100 K | — | — | 22 ms (4.6 M pts/s) |
-| 200 K | 4.4 s | **150 ms** (~29×) | 42 ms (4.7 M pts/s) |
-| 1 M   | ~25 s | **0.90 s** | — |
+| 200 K | 4.4 s | **39 ms** (~110×) | 42 ms (4.7 M pts/s) |
+| 1 M   | ~25 s | **0.19 s** | — |
+| 5 M   | — | 1.3 s | — |
+| 20 M  | — | 7.2 s | — |
+
+`build_tree_ka` was sped up 3–5× by switching from a per-node widest-dimension split (one
+workitem per node → a single thread scanning the whole segment at the top levels, ~83% of
+build time) to a **round-robin** split dimension (cycled by level, as in cudaKDTree/bosque),
+which needs no per-node min/max scan. The build is now sort-bound (≈78% is the per-level GPU
+`sortperm`, the natural floor of a sort-based build; ≈10% kernels). Reproduce:
+`julia --project=julia/GraphGP/bench julia/GraphGP/test/bench_tree.jl 20000000`.
 
 Reproduce: `julia --project=julia/GraphGP/bench julia/GraphGP/test/bench_build.jl 200000 10 3`.
 
@@ -131,8 +140,8 @@ all on the GPU, returning a device-resident `GraphGPProblem`):
 
 | N | build_graph_ka (GPU, end-to-end) |
 | --- | --- |
-| 200 K | **0.34 s** |
-| 1 M | **2.1 s** |
+| 200 K | **0.23 s** |
+| 1 M | **1.4 s** |
 
 (The CPU `build_graph` is tens of seconds at 200 K — `build_tree` alone is 4.4 s plus the
 scalar O(N²) query.) Validated by `check_graph` + generate/inverse roundtrip. So

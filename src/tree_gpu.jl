@@ -244,57 +244,26 @@ end
 #
 # The CPU `build_tree` (tree.jl) does a sequential BFS median split. The GPU build instead
 # mirrors the data-parallel JAX `_build_tree`: at each level, every node splits at the median
-# of its widest dimension, realized as a single global sort of all points by a composite key
-# (node-id in the integer part, normalized split coordinate in the fraction). One sort per
-# level → O(N log²N) total. Points keep descending so all live positions stay at the current
-# level (singletons descend the left spine). `sortperm`/`minimum` dispatch to the GPU backend
-# at run time, so this needs no compile-time CUDA dependency; it also runs on the KA CPU
-# backend. The resulting tree is a valid k-d tree (not byte-identical to the CPU build —
-# tie-breaking and the fractional key differ — but neighbor sets are equivalent).
+# of a round-robin dimension (`(level mod D)+1`, cycled by depth — as in cudaKDTree/bosque),
+# realized as a single global sort of all points by a composite key (node-id in the integer
+# part, normalized split coordinate in the fraction). One sort per level → O(N log²N) total.
+#
+# Round-robin avoids a per-node widest-dimension min/max scan, which was the build bottleneck:
+# that scan used one workitem per node, so at the top levels a single thread scanned the whole
+# segment (level 0 = one thread over all N points) — ~83% of build time. The split dimension
+# is now uniform per level, needs no computation, and is stored per node in `set_children`.
+#
+# Points keep descending so all live positions stay at the current level (singletons descend
+# the left spine). `sortperm`/`minimum` dispatch to the GPU backend at run time, so this needs
+# no compile-time CUDA dependency; it also runs on the KA CPU backend. The resulting tree is a
+# valid k-d tree (not byte-identical to the CPU build) and yields an equivalent Vecchia graph.
 
-# Per-node widest-dimension split selection for node ids in [lvl_lo, lvl_hi].
-@kernel function _build_splitdim_kernel!(split_dim, @Const(seg_lo), @Const(seg_hi),
-        @Const(pts), lvl_lo, max_node, ::Val{D}) where {D}
-    g = @index(Global)
-    node = lvl_lo + g - 1
-    @inbounds begin
-        if node <= max_node
-            lo = seg_lo[node]
-            if lo != 0
-                hi = seg_hi[node]
-                if lo == hi
-                    split_dim[node] = 1
-                else
-                    best_d = 1
-                    best_range = -Inf
-                    for d in 1:D
-                        mn = Inf
-                        mx = -Inf
-                        for i in lo:hi
-                            v = pts[d, i]
-                            v < mn && (mn = v)
-                            v > mx && (mx = v)
-                        end
-                        rng = mx - mn
-                        if rng > best_range
-                            best_range = rng
-                            best_d = d
-                        end
-                    end
-                    split_dim[node] = best_d
-                end
-            end
-        end
-    end
-end
-
-# Composite sort key per position: node id (integer part) + normalized split coordinate (frac).
-@kernel function _build_key_kernel!(key, @Const(node_of_pos), @Const(split_dim), @Const(pts),
-        gmin, ginv)
+# Composite sort key per position: node id (integer part) + this level's normalized split
+# coordinate (fraction). `sd` is the round-robin split dimension for the current level.
+@kernel function _build_key_kernel!(key, @Const(node_of_pos), @Const(pts), sd, gmin, ginv)
     i = @index(Global)
     @inbounds begin
         node = node_of_pos[i]
-        sd = split_dim[node]
         c = pts[sd, i]
         f = (c - gmin) * ginv
         f = f < 0.0 ? 0.0 : (f > 0.9999999999 ? 0.9999999999 : f)
@@ -302,8 +271,8 @@ end
     end
 end
 
-# Set child segment ranges for non-leaf nodes in [lvl_lo, lvl_hi].
-@kernel function _build_setchildren_kernel!(seg_lo, seg_hi, lvl_lo, max_node)
+# Set child segment ranges and record the split dimension for non-leaf nodes in this level.
+@kernel function _build_setchildren_kernel!(seg_lo, seg_hi, split_dim, lvl_lo, sd, max_node)
     g = @index(Global)
     node = lvl_lo + g - 1
     @inbounds begin
@@ -313,6 +282,7 @@ end
                 hi = seg_hi[node]
                 if lo < hi && 2 * node + 1 <= max_node
                     mid = (lo + hi) >>> 1
+                    split_dim[node] = sd
                     seg_lo[2 * node] = lo
                     seg_hi[2 * node] = mid
                     seg_lo[2 * node + 1] = mid + 1
@@ -370,17 +340,15 @@ function build_tree_ka(pts::AbstractMatrix; backend = get_backend(pts))
     for L in 0:(Lmax - 1)
         lvl_lo = 1 << L
         nlvl = lvl_lo                      # node ids [2^L, 2^(L+1)-1] → 2^L of them
-        _build_splitdim_kernel!(backend)(split_dim, seg_lo, seg_hi, spts, lvl_lo, max_node,
-            Val(D); ndrange = nlvl, workgroupsize = wgs)
-        synchronize(backend)
-        _build_key_kernel!(backend)(key, node_of_pos, split_dim, spts, gmin, ginv;
+        sd = (L % D) + 1                   # round-robin split dimension for this level
+        _build_key_kernel!(backend)(key, node_of_pos, spts, sd, gmin, ginv;
             ndrange = N, workgroupsize = wgs)
         synchronize(backend)
         sp = sortperm(key)                 # dispatches to the GPU sort when key is on device
         spts = spts[:, sp]
         perm = perm[sp]
         node_of_pos = node_of_pos[sp]
-        _build_setchildren_kernel!(backend)(seg_lo, seg_hi, lvl_lo, max_node;
+        _build_setchildren_kernel!(backend)(seg_lo, seg_hi, split_dim, lvl_lo, sd, max_node;
             ndrange = nlvl, workgroupsize = wgs)
         synchronize(backend)
         _build_assign_kernel!(backend)(node_of_pos, seg_lo, seg_hi, max_node;
