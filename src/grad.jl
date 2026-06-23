@@ -102,10 +102,18 @@ function refine_logdet_grad_vals(prob::GraphGPProblem{T};
         return dvals
     end
     dvals = KernelAbstractions.zeros(backend, T, length(prob.vals))
-    kernel = refine_logdet_grad_kernel!(backend)
-    kernel(dvals, prob.coords, prob.neighbors, prob.n0, prob.scale, prob.bins, prob.vals,
-        nbins(prob), one(T), Val(K), Val(D);
-        ndrange = nrefined(prob), workgroupsize = _wgsize(backend))
+    M = nrefined(prob)
+    nb = nbins(prob)
+    if nb <= _HIST_BINS
+        W = _wgsize_scatter(backend)
+        refine_logdet_grad_hist_kernel!(backend)(dvals, prob.coords, prob.neighbors, prob.n0,
+            prob.scale, prob.bins, prob.vals, nb, M, one(T), W, Val(K), Val(D);
+            ndrange = cld(M, W) * W, workgroupsize = W)
+    else
+        refine_logdet_grad_kernel!(backend)(dvals, prob.coords, prob.neighbors, prob.n0,
+            prob.scale, prob.bins, prob.vals, nb, one(T), Val(K), Val(D);
+            ndrange = M, workgroupsize = _wgsize(backend))
+    end
     KernelAbstractions.synchronize(backend)
     return dvals
 end
@@ -583,12 +591,21 @@ function refine_inv_loss_grad_vals(prob::GraphGPProblem{T}, values;
     end
     # GPU path: hand-written kernel computes xi inline and scatters gradient atomically.
     M = nrefined(prob)
+    nb = nbins(prob)
     xi_out = KernelAbstractions.zeros(backend, T, M)
     dvals = KernelAbstractions.zeros(backend, T, length(prob.vals))
-    refine_inv_loss_grad_kernel!(backend)(
-        dvals, xi_out, prob.coords, prob.neighbors, values, prob.n0, prob.scale,
-        prob.bins, prob.vals, nbins(prob), Val(K), Val(D);
-        ndrange = M, workgroupsize = _wgsize(backend))
+    if nb <= _HIST_BINS
+        W = _wgsize_scatter(backend)
+        refine_inv_loss_grad_hist_kernel!(backend)(
+            dvals, xi_out, prob.coords, prob.neighbors, values, prob.n0, prob.scale,
+            prob.bins, prob.vals, nb, M, W, Val(K), Val(D);
+            ndrange = cld(M, W) * W, workgroupsize = W)
+    else
+        refine_inv_loss_grad_kernel!(backend)(
+            dvals, xi_out, prob.coords, prob.neighbors, values, prob.n0, prob.scale,
+            prob.bins, prob.vals, nb, Val(K), Val(D);
+            ndrange = M, workgroupsize = _wgsize(backend))
+    end
     KernelAbstractions.synchronize(backend)
     loss = sum(abs2, xi_out) / 2
     return loss, dvals
@@ -615,12 +632,21 @@ function generate_logdet_and_grad_vals(prob::GraphGPProblem{T};
     end
     # GPU: single fused kernel emits logdet_terms and scatters d_vals in one Cholesky pass.
     M = nrefined(prob)
+    nb = nbins(prob)
     logdet_terms = KernelAbstractions.zeros(backend, T, M)
     dvals = KernelAbstractions.zeros(backend, T, length(prob.vals))
-    refine_logdet_and_grad_kernel!(backend)(
-        logdet_terms, dvals, prob.coords, prob.neighbors, prob.n0, prob.scale,
-        prob.bins, prob.vals, nbins(prob), one(T), Val(K), Val(D);
-        ndrange = M, workgroupsize = _wgsize(backend))
+    if nb <= _HIST_BINS
+        W = _wgsize_scatter(backend)
+        refine_logdet_and_grad_hist_kernel!(backend)(
+            logdet_terms, dvals, prob.coords, prob.neighbors, prob.n0, prob.scale,
+            prob.bins, prob.vals, nb, M, one(T), W, Val(K), Val(D);
+            ndrange = cld(M, W) * W, workgroupsize = W)
+    else
+        refine_logdet_and_grad_kernel!(backend)(
+            logdet_terms, dvals, prob.coords, prob.neighbors, prob.n0, prob.scale,
+            prob.bins, prob.vals, nb, one(T), Val(K), Val(D);
+            ndrange = M, workgroupsize = _wgsize(backend))
+    end
     KernelAbstractions.synchronize(backend)
     ref_ld = sum(logdet_terms)
     dense_ld = generate_dense_logdet(view(prob.coords, :, 1:n0), prob.scale, prob.bins,
