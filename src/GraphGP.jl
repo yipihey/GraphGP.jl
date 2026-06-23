@@ -18,7 +18,7 @@ include("tree_gpu.jl")
 include("graph_build.jl")
 include("chainrules.jl")
 
-export GraphGPProblem, npoints, nneighbors, nrefined, ndims_space, nbins
+export GraphGPProblem, npoints, nneighbors, nrefined, ndims_space, nbins, to_backend
 export cov_lookup
 export refine_logdet, refine_logdet_terms, refine_inv, refine_inv!
 export refine, refine!
@@ -35,6 +35,6 @@ export build_graph, compute_depths, order_by_depth, build_tree
 export query_preceding_neighbors, quantize_to_lattice, check_graph
 export query_preceding_neighbors_ka
 # Phase 10: differentiability (ChainRules entry points)
-export logdet_of_vals, inv_quadratic_loss_of_vals
+export logdet_of_vals, inv_quadratic_loss_of_vals, generate_grad_xi
 
 end # module

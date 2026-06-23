@@ -27,7 +27,8 @@ function generate(prob::GraphGPProblem{T}, xi::AbstractVector{T};
     # Reorder to original ordering if the problem was built from a permuted graph.
     if prob.indices !== nothing
         out = similar(values)
-        out[prob.indices] = values
+        idx = _move_to_backend(prob.indices, backend)   # index vector must be on-device for GPU
+        out[idx] = values
         return out
     end
     return values
@@ -45,16 +46,21 @@ function generate_inv(prob::GraphGPProblem{T}, values::AbstractVector{T};
     n0 = prob.n0
     # Permute to tree/depth order if needed.
     values_ord = if prob.indices !== nothing
-        values[prob.indices]
+        values[_move_to_backend(prob.indices, backend)]
     else
         values
     end
-    # Refinement inverse.
+    # Refinement inverse (on the problem's backend).
     xi_ref = refine_inv(prob, values_ord; backend = backend)
-    # Dense inverse.
+    # Dense inverse (host LAPACK; small block).
     xi_dense = generate_dense_inv(view(prob.coords, :, 1:n0), prob.scale, prob.bins, prob.vals,
         values_ord[1:n0])
-    return vcat(xi_dense, xi_ref)
+    # Assemble the full xi on the problem's backend (dense block first, then refined).
+    N = npoints(prob)
+    xi = KernelAbstractions.zeros(backend, T, N)
+    copyto!(view(xi, 1:n0), xi_dense)        # host → device if on GPU
+    copyto!(view(xi, n0 + 1:N), xi_ref)
+    return xi
 end
 
 """

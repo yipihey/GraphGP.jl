@@ -47,3 +47,26 @@ end
     gα_ref = sum(generate_logdet_grad_vals(probα) .* base)
     @test isapprox(gα, gα_ref; rtol = 1e-6)
 end
+
+@testset "d/dxi VJP and generate rrule" begin
+    using Zygote
+    using LinearAlgebra: dot
+    rng = Random.MersenneTwister(9)
+    N, D, n0, k = 600, 3, 25, 8
+    pts = randn(rng, N, D)
+    bins, vals = rbf_kernel(Float64(1.0), Float64(0.4), 1e-4, 1e1, 200; jitter = Float64(1e-3))
+    prob = build_graph(pts, n0, k, bins, vals)
+    xr = randn(rng, N)
+    vb = randn(rng, N)
+
+    # generate is linear in xi → exact adjoint identity ⟨v̄, G·x⟩ = ⟨Gᵀv̄, x⟩.
+    @test isapprox(dot(vb, generate(prob, xr)), dot(generate_grad_xi(prob, vb), xr); rtol = 1e-10)
+
+    # Zygote backprop through generate matches the analytic VJP.
+    gz = Zygote.gradient(x -> dot(vb, generate(prob, x)), xr)[1]
+    @test isapprox(gz, generate_grad_xi(prob, vb); rtol = 1e-8)
+
+    # Scalar loss 0.5‖generate(xi)‖²: gradient is Gᵀ(G·xi).
+    gz2 = Zygote.gradient(x -> sum(abs2, generate(prob, x)) / 2, xr)[1]
+    @test isapprox(gz2, generate_grad_xi(prob, generate(prob, xr)); rtol = 1e-8)
+end

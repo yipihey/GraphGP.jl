@@ -66,7 +66,16 @@ Matches `graph.py:compute_depths`.
 `neighbors` is (k, M) 1-based, column-major (as returned by `query_preceding_neighbors`).
 Returns a length-N depth vector.
 """
-function compute_depths(neighbors::AbstractMatrix{Int}, n0::Int)
+function compute_depths(neighbors::AbstractMatrix{<:Integer}, n0::Int)
+    backend = KernelAbstractions.get_backend(neighbors)
+    if backend isa KernelAbstractions.CPU
+        return _compute_depths_cpu(neighbors, n0)
+    else
+        return _compute_depths_ka(neighbors, n0, backend)
+    end
+end
+
+function _compute_depths_cpu(neighbors::AbstractMatrix{<:Integer}, n0::Int)
     k, M = size(neighbors)
     N = n0 + M
     depths = fill(typemax(Int), N)
@@ -93,6 +102,48 @@ function compute_depths(neighbors::AbstractMatrix{Int}, n0::Int)
                 changed = true
             end
         end
+    end
+    return depths
+end
+
+# One relaxation pass over all refined points; sets changed[1]=1 if any depth increased.
+# Depths start at 0 and increase monotonically to the unique longest-path fixed point, so
+# benign read/write races across passes only cost extra iterations (never wrong results).
+@kernel function _depths_relax_kernel!(depths, @Const(neighbors), n0, changed,
+        ::Val{K}) where {K}
+    m = @index(Global)
+    @inbounds begin
+        mx = 0
+        for ki in 1:K
+            nb = neighbors[ki, m]
+            if nb > 0
+                d = depths[nb]
+                d > mx && (mx = d)
+            end
+        end
+        newd = mx + 1
+        if depths[n0 + m] != newd
+            depths[n0 + m] = newd
+            changed[1] = 1
+        end
+    end
+end
+
+function _compute_depths_ka(neighbors::AbstractMatrix{<:Integer}, n0::Int, backend)
+    K, M = size(neighbors)
+    N = n0 + M
+    depths = KernelAbstractions.zeros(backend, Int, N)   # all 0; first n0 stay 0
+    changed = KernelAbstractions.zeros(backend, Int, 1)
+    kernel = _depths_relax_kernel!(backend)
+    iters = 0
+    while true
+        fill!(changed, 0)
+        kernel(depths, neighbors, n0, changed, Val(K); ndrange = M,
+            workgroupsize = _wgsize(backend))
+        KernelAbstractions.synchronize(backend)
+        Array(changed)[1] == 0 && break
+        iters += 1
+        iters > N && error("compute_depths did not converge (cycle in neighbor graph?)")
     end
     return depths
 end
@@ -177,12 +228,14 @@ Map float points (N×D) isotropically onto a `bits`-bit integer lattice.
 Returns UInt32 coordinates (N×D), the origin, and the lattice scale (physical distance
 per lattice step, isotropic).
 """
-function quantize_to_lattice(points::Matrix{Float64}, bits::Int = 21)
+function quantize_to_lattice(points::AbstractMatrix{<:Real}, bits::Int = 21)
     lmax = Float64((1 << bits) - 1)
     origin = vec(minimum(points; dims = 1))
     extents = vec(maximum(points; dims = 1)) .- origin
     extent = maximum(extents)
     scale = extent > 0 ? extent / lmax : 1.0 / lmax
+    # Broadcast + reduction primitives are backend-generic, so a CuMatrix input quantizes on
+    # the GPU and returns a CuMatrix{UInt32}.
     coords_f = (points .- origin') ./ scale
     coords = UInt32.(clamp.(round.(Int64, coords_f), 0, Int64(lmax)))
     return coords, origin, scale
@@ -210,8 +263,11 @@ function build_graph(points::Matrix{Float64}, n0::Int, k::Int,
     # Step 1: build k-d tree (tree order).
     sorted_pts, seg_lo, seg_hi, split_dim, tree_perm = build_tree(points)
 
-    # Step 2: query preceding neighbors in tree order.
-    neighbors = query_preceding_neighbors(sorted_pts, seg_lo, seg_hi, split_dim, n0, k)
+    # Step 2: query preceding neighbors in tree order. Use the KernelAbstractions query
+    # (precomputed per-node AABBs) instead of the scalar O(N^2) reference: same neighbor sets,
+    # far cheaper, and GPU-capable when the tree arrays live on a device.
+    spts = permutedims(sorted_pts)  # (D, N)
+    neighbors = Matrix{Int}(query_preceding_neighbors_ka(spts, seg_lo, seg_hi, split_dim, n0, k))
 
     # Step 3: depth ordering.
     depths = compute_depths(neighbors, n0)

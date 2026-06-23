@@ -51,3 +51,30 @@ nrefined(p::GraphGPProblem) = size(p.neighbors, 2)
 nbins(p::GraphGPProblem) = length(p.bins)
 
 KernelAbstractions.get_backend(p::GraphGPProblem) = KernelAbstractions.get_backend(p.coords)
+
+# Move an array to `backend` (backend-generic: works for CPU and any KA GPU backend without a
+# hard CUDA dependency).
+function _move_to_backend(x::AbstractArray, backend)
+    dst = KernelAbstractions.allocate(backend, eltype(x), size(x)...)
+    copyto!(dst, x)
+    return dst
+end
+
+"""
+    to_backend(prob::GraphGPProblem, backend) -> GraphGPProblem
+
+Return a copy of `prob` with its device arrays (`coords`, `neighbors`, `bins`, `vals`) moved to
+`backend` — e.g. `to_backend(prob, CUDABackend())` to run generation/gradients on the GPU, or
+`to_backend(prob, CPU())` to bring a device problem back to the host. `offsets`/`indices` are
+host-side dispatch data and stay on the CPU. This is the one-call "build on CPU, run on GPU"
+bridge; all kernels then dispatch to `backend` automatically.
+"""
+function to_backend(prob::GraphGPProblem, backend)
+    return GraphGPProblem(
+        _move_to_backend(prob.coords, backend),
+        _move_to_backend(prob.neighbors, backend),
+        prob.offsets, prob.n0, prob.scale,
+        _move_to_backend(prob.bins, backend),
+        _move_to_backend(prob.vals, backend),
+        prob.indices)
+end

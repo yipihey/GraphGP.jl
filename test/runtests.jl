@@ -37,7 +37,9 @@ let cuda_ok = false
                     prob.n0, prob.scale, CuArray(prob.bins), CuArray(prob.vals), prob.indices)
             end
 
-            prob_cpu, ref = load_problem("small")
+            # Load in Float64 so the problem eltype matches the Float64 reference data
+            # (generate_inv_loss_grad_vals requires data eltype == problem eltype).
+            prob_cpu, ref = load_problem("small"; T = Float64)
             prob_gpu = to_gpu(prob_cpu)
             data64 = ref.values64
             data_gpu = CuArray(data64)
@@ -86,6 +88,30 @@ let cuda_ok = false
                     Set(nb_gpu[:, m]) == Set(nb_ref[:, m]) || (mism += 1)
                 end
                 @test mism == 0
+            end
+
+            @testset "GPU end-to-end: build on CPU, run on GPU (to_backend)" begin
+                rng = MersenneTwister(77)
+                N, D, n0, k = 1500, 3, 40, 8
+                pts = randn(rng, N, D)
+                bins, vals = rbf_kernel(1.0, 0.4, 1e-4, 1e1, 300; jitter = 1e-3)  # Float64
+                prob = build_graph(pts, n0, k, bins, vals)
+                pg = to_backend(prob, CUDABackend())
+
+                # compute_depths parity (GPU relaxation kernel).
+                @test compute_depths(prob.neighbors, prob.n0) ==
+                      Array(compute_depths(CuArray(prob.neighbors), prob.n0))
+
+                # Full generate / generate_inv roundtrip on the GPU (dense + refine + permute).
+                xi = randn(rng, N)
+                v_gpu = generate(pg, CuArray(xi))
+                xi_back = Array(generate_inv(pg, v_gpu))
+                @test isapprox(xi_back, xi; rtol = 1e-6, atol = 1e-8)
+
+                # logdet and its gradient match the CPU build.
+                @test isapprox(generate_logdet(pg), generate_logdet(prob); rtol = 1e-6)
+                @test isapprox(Array(generate_logdet_grad_vals(pg)),
+                    generate_logdet_grad_vals(prob); rtol = 1e-5)
             end
 
             @testset "backend consistency check" begin

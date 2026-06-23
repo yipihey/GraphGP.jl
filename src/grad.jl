@@ -140,7 +140,79 @@ Combines the analytic hand-written refinement adjoint with the dense-layer Chole
 """
 function generate_logdet_grad_vals(prob::GraphGPProblem{T};
         backend = KernelAbstractions.get_backend(prob)) where {T}
-    return refine_logdet_grad_vals(prob; backend = backend) .+ _dense_logdet_grad_vals(prob)
+    dv_ref = refine_logdet_grad_vals(prob; backend = backend)
+    dv_dense = _dense_logdet_grad_vals(prob)                  # host (small dense block)
+    return dv_ref .+ _move_to_backend(dv_dense, backend)
+end
+
+"""
+    generate_grad_xi(prob, vbar; backend) -> x̄
+
+Vector-Jacobian product of `generate(prob, xi)` with respect to `xi`, for an output cotangent
+`vbar` (same length/ordering as `generate`'s output). `generate` is linear in `xi`, so this is
+exact. Returns `x̄` (tree/depth order, length `N`) on `prob`'s backend.
+
+The conditional mean/std weights are computed with the existing parallel kernel; the reverse
+accumulation over depth batches (transpose of the causal generation sweep) is done on the host
+(it is inherently sequential across batches), then the dense first-layer adjoint `Lᵀ·v̄[1:n0]`
+is applied. Used by the `rrule` for `generate`, so AD frameworks can backprop through samples.
+"""
+function generate_grad_xi(prob::GraphGPProblem{T}, vbar::AbstractVector;
+        backend = KernelAbstractions.get_backend(prob)) where {T}
+    n0 = prob.n0
+    N = npoints(prob)
+    M = nrefined(prob)
+    K = nneighbors(prob)
+    D = ndims_space(prob)
+
+    # mean_vec (K×M) and std (M) via the parallel kernel, then to host for the reverse sweep.
+    mean_vec = KernelAbstractions.zeros(backend, T, K, M)
+    std = KernelAbstractions.zeros(backend, T, M)
+    refine_meanvec_std_kernel!(backend)(mean_vec, std, prob.coords, prob.neighbors, n0,
+        prob.scale, prob.bins, prob.vals, nbins(prob), Val(K), Val(D);
+        ndrange = M, workgroupsize = _wgsize(backend))
+    KernelAbstractions.synchronize(backend)
+    mv = Array(mean_vec)
+    sd = Array(std)
+    nb = Array(prob.neighbors)
+
+    # values̄ in tree order on host: undo generate's output permutation (out[indices]=values).
+    vb = Array(vbar)
+    if prob.indices !== nothing
+        idx = prob.indices
+        tmp = similar(vb)
+        @inbounds for i in 1:N
+            tmp[i] = vb[idx[i]]
+        end
+        vb = tmp
+    end
+
+    # Reverse sweep over depth batches (latest first): transpose of the causal apply.
+    offs = prob.offsets
+    xg = zeros(T, N)
+    @inbounds for b in length(offs):-1:2
+        lo = offs[b - 1] + 1
+        hi = offs[b]
+        for p in hi:-1:lo
+            m = p - n0
+            xg[p] = sd[m] * vb[p]
+            for j in 1:K
+                nbj = nb[j, m]
+                nbj > 0 || continue
+                vb[nbj] += mv[j, m] * vb[p]
+            end
+        end
+    end
+
+    # Dense first-layer adjoint: x̄[1:n0] = Lᵀ · v̄[1:n0].
+    coords_n0 = Array(view(prob.coords, :, 1:n0))
+    bins = Array(prob.bins)
+    vals = Array(prob.vals)
+    Kd = _assemble_dense_cov(coords_n0, prob.scale, bins, vals, n0)
+    L = LinearAlgebra.cholesky!(LinearAlgebra.Symmetric(Kd, :L)).L
+    xg[1:n0] = transpose(L) * vb[1:n0]
+
+    return _move_to_backend(xg, backend)
 end
 
 """
@@ -152,7 +224,7 @@ Returns `loss = 0.5 * ||generate_inv(prob, data)||^2` and its gradient w.r.t. `p
 function generate_inv_loss_grad_vals(prob::GraphGPProblem{T}, data::AbstractVector{T};
         backend = KernelAbstractions.get_backend(prob)) where {T}
     n0 = prob.n0
-    data_ord = prob.indices !== nothing ? data[prob.indices] : data
+    data_ord = prob.indices !== nothing ? data[_move_to_backend(prob.indices, backend)] : data
     # Dense part
     xi_dense = generate_dense_inv(view(prob.coords, :, 1:n0), prob.scale, prob.bins, prob.vals,
         data_ord[1:n0])
@@ -160,7 +232,7 @@ function generate_inv_loss_grad_vals(prob::GraphGPProblem{T}, data::AbstractVect
     g_dense = _dense_inv_loss_grad_vals(prob, data_ord[1:n0])
     # Refinement part
     ref_loss, g_ref = refine_inv_loss_grad_vals(prob, data_ord; backend = backend)
-    return dense_loss + ref_loss, g_dense .+ g_ref
+    return dense_loss + ref_loss, g_ref .+ _move_to_backend(g_dense, backend)
 end
 
 # Per-point backward of refine_inv w.r.t. cov_vals.
@@ -330,7 +402,7 @@ function generate_logdet_and_grad_vals(prob::GraphGPProblem{T};
     ref_ld = sum(logdet_terms)
     dense_ld = generate_dense_logdet(view(prob.coords, :, 1:n0), prob.scale, prob.bins,
         prob.vals, n0)
-    dense_dvals = _dense_logdet_grad_vals(prob)
-    return T(dense_ld) + ref_ld, dense_dvals .+ dvals
+    dense_dvals = _dense_logdet_grad_vals(prob)              # host (small dense block)
+    return T(dense_ld) + ref_ld, dvals .+ _move_to_backend(dense_dvals, backend)
 end
 

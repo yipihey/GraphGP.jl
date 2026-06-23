@@ -14,6 +14,11 @@ using the same integer-distance + cov_lookup pipeline as the KA kernels.
 """
 function _assemble_dense_cov(coords::AbstractMatrix{UInt32}, scale::T,
         bins::AbstractVector, vals::AbstractVector, n::Int) where {T}
+    # The dense first layer is small (n0 ≲ 1000) and uses host LAPACK; materialize the inputs
+    # on the CPU so this path works regardless of whether the problem lives on a GPU.
+    coords = Array(coords)
+    bins = Array(bins)
+    vals = Array(vals)
     nb = length(bins)
     D = size(coords, 1)
     K = Matrix{T}(undef, n, n)
@@ -79,6 +84,7 @@ Sample the first n0 = length(xi) points from the dense GP: returns `L * xi` wher
 """
 function generate_dense(coords::AbstractMatrix{UInt32}, scale::T,
         bins::AbstractVector, vals::AbstractVector, xi::AbstractVector{T}) where {T}
+    xi = Array(xi)                       # host LAPACK path (small dense block)
     n0 = length(xi)
     K = _assemble_dense_cov(coords, scale, bins, vals, n0)
     L = LinearAlgebra.cholesky!(LinearAlgebra.Symmetric(K, :L)).L
@@ -93,6 +99,7 @@ Matches `refine.py:generate_dense_inv`.
 """
 function generate_dense_inv(coords::AbstractMatrix{UInt32}, scale::T,
         bins::AbstractVector, vals::AbstractVector, values::AbstractVector{T}) where {T}
+    values = Array(values)               # host LAPACK path (small dense block)
     n0 = length(values)
     K = _assemble_dense_cov(coords, scale, bins, vals, n0)
     L = LinearAlgebra.cholesky!(LinearAlgebra.Symmetric(K, :L)).L
@@ -119,8 +126,9 @@ function _dense_logdet_grad_vals(prob::GraphGPProblem{T}) where {T}
     n0 = prob.n0
     D = ndims_space(prob)
     nb = nbins(prob)
-    coords_n0 = view(prob.coords, :, 1:n0)
-    K = _assemble_dense_cov(coords_n0, prob.scale, prob.bins, prob.vals, n0)
+    coords_n0 = Array(view(prob.coords, :, 1:n0))   # host (small dense block)
+    bins = Array(prob.bins)
+    K = _assemble_dense_cov(coords_n0, prob.scale, bins, prob.vals, n0)
     L = LinearAlgebra.cholesky!(LinearAlgebra.Symmetric(K, :L)).L
     Linv = Matrix(LinearAlgebra.inv(LinearAlgebra.LowerTriangular(L)))
     dv = zeros(T, nb)
@@ -137,7 +145,7 @@ function _dense_logdet_grad_vals(prob::GraphGPProblem{T}) where {T}
                 sq += di * di
             end
             r = sqrt(T(sq)) * prob.scale
-            lo, wlo, whi = cov_lookup_weights(r, prob.bins, nb)
+            lo, wlo, whi = cov_lookup_weights(r, bins, nb)
             g = a == b ? Kinv_ab : 2 * Kinv_ab
             dv[lo] += g * wlo
             dv[lo + 1] += g * whi
@@ -154,8 +162,9 @@ function _dense_inv_loss_grad_vals(prob::GraphGPProblem{T},
     n0 = prob.n0
     D = ndims_space(prob)
     nb = nbins(prob)
-    coords_n0 = view(prob.coords, :, 1:n0)
-    xi_d = generate_dense_inv(coords_n0, prob.scale, prob.bins, prob.vals, data_dense)
+    coords_n0 = Array(view(prob.coords, :, 1:n0))   # host (small dense block)
+    bins = Array(prob.bins)
+    xi_d = generate_dense_inv(coords_n0, prob.scale, bins, prob.vals, data_dense)
     dv = zeros(T, nb)
     for b in 1:n0
         xib = xi_d[b]
@@ -166,7 +175,7 @@ function _dense_inv_loss_grad_vals(prob::GraphGPProblem{T},
                 sq += di * di
             end
             r = sqrt(T(sq)) * prob.scale
-            lo, wlo, whi = cov_lookup_weights(r, prob.bins, nb)
+            lo, wlo, whi = cov_lookup_weights(r, bins, nb)
             g = a == b ? -T(0.5) * xib * xi_d[a] : -xib * xi_d[a]
             dv[lo] += g * wlo
             dv[lo + 1] += g * whi

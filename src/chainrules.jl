@@ -48,6 +48,15 @@ function inv_quadratic_loss_of_vals(prob::GraphGPProblem, vals::AbstractVector, 
     return sum(abs2, generate_inv(_set_vals(prob, vals), data)) / 2
 end
 
+function ChainRulesCore.rrule(::typeof(generate), prob::GraphGPProblem, xi::AbstractVector)
+    y = generate(prob, xi)
+    function generate_pullback(ȳ)
+        x̄ = @thunk(generate_grad_xi(prob, unthunk(ȳ)))
+        return (NoTangent(), NoTangent(), x̄)
+    end
+    return y, generate_pullback
+end
+
 function ChainRulesCore.rrule(::typeof(inv_quadratic_loss_of_vals), prob::GraphGPProblem,
         vals::AbstractVector, data::AbstractVector)
     prob2 = _set_vals(prob, vals)
