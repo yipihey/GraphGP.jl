@@ -1,11 +1,17 @@
 # Host-side drivers. These launch the per-point kernels and perform the (cheap) host-side
 # reductions. They are the public, differentiable entry points.
 
-# Workgroup size for GPU kernel launches. 64 threads/block suits our private-memory-heavy
-# kernels (~270 f32 registers per thread for K=8, D=2) better than KA's CUDA default (256),
-# which would over-subscribe registers and reduce occupancy.
-# On CPU the KA backend uses this as a task-chunk hint; the value is not critical there.
-_wgsize(backend) = backend isa KernelAbstractions.CPU ? nothing : 64
+# Workgroup size for GPU kernel launches. 32 (one warp/block) measured best for our
+# private-memory-heavy kernels on an A6000 — the large per-thread scratch (the (k+1)² matrix,
+# and the query's DFS stack) limits occupancy, so the smallest block maximizes warps-in-flight.
+# Benchmarked vs 64/128/256: refine_logdet +10–12%, the k-NN query kernel +50%. The
+# atomic-scatter *point*-gradient kernels are the exception (they prefer a larger block — see
+# `_WG_SCATTER` — because the scatter target is large and atomic latency hides better with more
+# threads). On CPU the KA backend uses this as a task-chunk hint; the value is not critical there.
+_wgsize(backend) = backend isa KernelAbstractions.CPU ? nothing : 32
+
+# Workgroup size for the atomic-scatter point-gradient kernels (scatter into a large d_points).
+_wgsize_scatter(backend) = backend isa KernelAbstractions.CPU ? nothing : 256
 
 """
     refine_logdet(prob; backend) -> T

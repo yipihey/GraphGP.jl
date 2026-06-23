@@ -170,7 +170,7 @@ function refine_logdet_grad_points(prob::GraphGPProblem{T};
     dpts = KernelAbstractions.zeros(backend, T, D, N)
     refine_logdet_grad_points_kernel!(backend)(dpts, prob.coords, prob.neighbors, prob.n0,
         prob.scale, prob.bins, prob.vals, nbins(prob), one(T), Val(K), Val(D);
-        ndrange = M, workgroupsize = _wgsize(backend))
+        ndrange = M, workgroupsize = _wgsize_scatter(backend))
     KernelAbstractions.synchronize(backend)
     return dpts
 end
@@ -261,7 +261,7 @@ function refine_inv_loss_grad_points(prob::GraphGPProblem{T}, values::AbstractVe
     dpts = KernelAbstractions.zeros(backend, T, D, N)
     refine_inv_loss_grad_points_kernel!(backend)(dpts, prob.coords, prob.neighbors, values,
         prob.n0, prob.scale, prob.bins, prob.vals, nbins(prob), Val(K), Val(D);
-        ndrange = M, workgroupsize = _wgsize(backend))
+        ndrange = M, workgroupsize = _wgsize_scatter(backend))
     KernelAbstractions.synchronize(backend)
     return dpts
 end

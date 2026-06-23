@@ -34,9 +34,16 @@ const _QSTACK = 64   # max DFS stack depth (supports trees over up to ~2^63 poin
 # Positions (lo, hi, split_dim) are stored as Int32 (exact up to ~2.1e9 points); the geometry
 # fields (split_val, min, max) are Float32 stored via bit-reinterpret into the same Int32 array.
 # This gives one coalesced fetch per node *and* exact positions *and* fast f32 geometry math.
-# For a leaf (lo==hi) min==max==the point coordinates (no extra `spts` read). rec[1]==0 marks
-# an empty implicit node.
-@kernel function _node_pack_kernel!(rec, @Const(seg_lo), @Const(seg_hi), @Const(split_dim),
+# `rec[1]==0` marks an empty implicit node.
+#
+# The subtree bounding box (min/max) is built BOTTOM-UP rather than by scanning each node's
+# segment: a per-node scan is one workitem per node, so the root scans all N points in a single
+# thread (the same bottleneck that dominated build_tree). Instead `_node_pack_init!` sets each
+# leaf box to its point and each internal box to a placeholder (O(1) per node, fully parallel),
+# then `_node_merge!` sweeps levels deepest→root merging child boxes — O(N) total, parallel.
+
+# Per-node init: positions + split + leaf boxes (placeholder box for internal nodes).
+@kernel function _node_pack_init!(rec, @Const(seg_lo), @Const(seg_hi), @Const(split_dim),
         @Const(spts), ::Val{D}) where {D}
     node = @index(Global)
     @inbounds begin
@@ -48,24 +55,44 @@ const _QSTACK = 64   # max DFS stack depth (supports trees over up to ~2^63 poin
             rec[1, node] = Int32(lo)
             rec[2, node] = Int32(hi)
             if lo < hi
-                sd = split_dim[node]                       # internal: split dim/value
+                sd = split_dim[node]
                 rec[3, node] = Int32(sd)
                 mid = (lo + hi) >>> 1
                 rec[4, node] = reinterpret(Int32, Float32(spts[sd, mid]))
-            else
-                rec[3, node] = Int32(1)                    # leaf: split unused
-                rec[4, node] = Int32(0)
-            end
-            for d in 1:D
-                mn = Inf32
-                mx = -Inf32
-                for i in lo:hi
-                    v = Float32(spts[d, i])
-                    v < mn && (mn = v)
-                    v > mx && (mx = v)
+                for d in 1:D
+                    rec[4 + d, node] = reinterpret(Int32, Inf32)      # filled by merge
+                    rec[4 + D + d, node] = reinterpret(Int32, -Inf32)
                 end
-                rec[4 + d, node] = reinterpret(Int32, mn)
-                rec[4 + D + d, node] = reinterpret(Int32, mx)
+            else
+                rec[3, node] = Int32(1)
+                rec[4, node] = Int32(0)
+                for d in 1:D
+                    v = Float32(spts[d, lo])                          # leaf box = the point
+                    rec[4 + d, node] = reinterpret(Int32, v)
+                    rec[4 + D + d, node] = reinterpret(Int32, v)
+                end
+            end
+        end
+    end
+end
+
+# Merge child boxes into each internal node at level `lvl_lo .. 2·lvl_lo-1` (one level).
+@kernel function _node_merge!(rec, lvl_lo, max_node, ::Val{D}) where {D}
+    g = @index(Global)
+    node = lvl_lo + g - 1
+    @inbounds begin
+        if node <= max_node && rec[1, node] != 0 && rec[1, node] < rec[2, node]
+            lc = 2 * node
+            rc = lc + 1
+            if rc <= max_node
+                for d in 1:D
+                    mn = min(reinterpret(Float32, rec[4 + d, lc]),
+                        reinterpret(Float32, rec[4 + d, rc]))
+                    mx = max(reinterpret(Float32, rec[4 + D + d, lc]),
+                        reinterpret(Float32, rec[4 + D + d, rc]))
+                    rec[4 + d, node] = reinterpret(Int32, mn)
+                    rec[4 + D + d, node] = reinterpret(Int32, mx)
+                end
             end
         end
     end
@@ -230,9 +257,18 @@ function query_preceding_neighbors_ka(spts::AbstractMatrix{Float64},
     rec = ka_zeros(backend, Int32, RW, max_node)
     spts32 = similar(spts, Float32)
     copyto!(spts32, spts)
-    _node_pack_kernel!(backend)(rec, seg_lo, seg_hi, split_dim, spts, Val(D);
-        ndrange = max_node, workgroupsize = _wgsize(backend))
+    wgs = _wgsize(backend)
+    # Init (leaf boxes + positions/split), then merge child boxes bottom-up (deepest → root).
+    _node_pack_init!(backend)(rec, seg_lo, seg_hi, split_dim, spts, Val(D);
+        ndrange = max_node, workgroupsize = wgs)
     synchronize(backend)
+    Lmax = floor(Int, log2(max_node))
+    for L in (Lmax - 1):-1:0
+        lvl_lo = 1 << L
+        _node_merge!(backend)(rec, lvl_lo, max_node, Val(D);
+            ndrange = lvl_lo, workgroupsize = wgs)
+        synchronize(backend)
+    end
     neighbors = ka_zeros(backend, Int, k, M)
     _query_kernel!(backend)(neighbors, rec, spts32, n0, max_node, Val(k), Val(D);
         ndrange = M, workgroupsize = _wgsize(backend))
