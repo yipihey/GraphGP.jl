@@ -70,3 +70,54 @@ function ChainRulesCore.rrule(::typeof(inv_quadratic_loss_of_vals), prob::GraphG
     end
     return loss, inv_quadratic_loss_pullback
 end
+
+# ── Point-position entry points ───────────────────────────────────────────────────────────
+#
+# These make the two likelihood terms differentiable w.r.t. point positions too, so the full
+# analytic AD surface — {cov_vals, hyperparameters, xi, points} — composes uniformly through
+# Zygote. The *forward value* uses the problem's (integer-lattice) coordinates as-is; `points`
+# only carries the gradient, so quantization is treated straight-through (the gradient is w.r.t.
+# the dequantized positions the problem was built from). `points` must therefore be those
+# positions, `(D, N)` in tree/depth order (e.g. `prob.scale .* coords`).
+
+"""
+    logdet_of_points(prob, points) -> T
+
+`generate_logdet(prob)`, differentiable in `points` (the dequantized `(D, N)` positions).
+The forward value is independent of `points` (it uses the lattice coordinates); the rrule
+returns `generate_logdet_grad_points(prob)`. Lattice quantization is straight-through.
+"""
+logdet_of_points(prob::GraphGPProblem, points::AbstractMatrix) = generate_logdet(prob)
+
+function ChainRulesCore.rrule(::typeof(logdet_of_points), prob::GraphGPProblem,
+        points::AbstractMatrix)
+    y = generate_logdet(prob)
+    function logdet_of_points_pullback(ȳ)
+        dpts = @thunk(generate_logdet_grad_points(prob) .* unthunk(ȳ))
+        return (NoTangent(), NoTangent(), dpts)
+    end
+    return y, logdet_of_points_pullback
+end
+
+"""
+    inv_quadratic_loss_of_points(prob, points, data) -> T
+
+`0.5‖generate_inv(prob, data)‖²`, differentiable in `points` (the dequantized `(D, N)`
+positions). The forward value uses the lattice coordinates; the rrule returns
+`generate_inv_loss_grad_points(prob, data)`. Lattice quantization is straight-through.
+"""
+function inv_quadratic_loss_of_points(prob::GraphGPProblem, points::AbstractMatrix,
+        data::AbstractVector)
+    return sum(abs2, generate_inv(prob, data)) / 2
+end
+
+function ChainRulesCore.rrule(::typeof(inv_quadratic_loss_of_points), prob::GraphGPProblem,
+        points::AbstractMatrix, data::AbstractVector)
+    loss = sum(abs2, generate_inv(prob, data)) / 2
+    function inv_quadratic_loss_of_points_pullback(l̄)
+        dpts = @thunk(generate_inv_loss_grad_points(prob, data) .* unthunk(l̄))
+        return (NoTangent(), NoTangent(), dpts,
+            @not_implemented("d(inv_quadratic_loss_of_points)/d(data) is not implemented yet"))
+    end
+    return loss, inv_quadratic_loss_of_points_pullback
+end

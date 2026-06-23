@@ -43,6 +43,34 @@ end
     @test isapprox(ld, ld_ref; rtol = 1e-8)
 end
 
+@testset "_dense_chol_L: exact when PD, jitter fallback when non-PD" begin
+    rng = Random.MersenneTwister(5)
+    # Positive-definite input: must match LAPACK exactly (no jitter added).
+    A = randn(rng, 30, 30)
+    Kpd = A * A' + 30 * LinearAlgebra.I
+    Lpd = GraphGP._dense_chol_L(Kpd)
+    @test isapprox(Lpd * Lpd', Kpd; rtol = 1e-10)
+
+    # Rank-deficient Gram (rank 3, size 40) → raw Cholesky is non-PD; the jittered fallback
+    # must return a finite factor instead of throwing.
+    B = randn(rng, 40, 3)
+    Knpd = B * B'
+    @test !LinearAlgebra.issuccess(
+        LinearAlgebra.cholesky(LinearAlgebra.Symmetric(Knpd, :L); check = false))
+    Lnpd = GraphGP._dense_chol_L(Knpd)
+    @test size(Lnpd) == (40, 40)
+    @test all(isfinite, Lnpd)
+
+    # End-to-end: a moderately ill-conditioned dense block (n0=1000) that previously threw
+    # PosDefException now yields finite logdet/gradients via the fallback.
+    N, D, n0, k = 4000, 3, 1000, 10
+    pts = randn(rng, N, D)
+    bins, vals = rbf_kernel(Float64(1.0), Float64(0.4), 1e-4, 1e1, 300; jitter = Float64(1e-3))
+    prob = build_graph(pts, n0, k, bins, vals)
+    @test isfinite(generate_logdet(prob))
+    @test all(isfinite, generate_logdet_grad_points(prob))
+end
+
 @testset "generate_dense f32 smoke" begin
     prob, _ = load_problem("small"; T = Float32)
     n0 = prob.n0

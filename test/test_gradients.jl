@@ -128,6 +128,25 @@ end
     end
 end
 
+@testset "ChainRules d/dpoints composes (Zygote)" begin
+    using Zygote
+    prob, ref = load_problem("small"; T = Float64)
+    data = ref.values64
+    X = prob.scale .* Float64.(Array(prob.coords))      # dequantized positions (forward ignores X)
+
+    gz = Zygote.gradient(P -> logdet_of_points(prob, P), X)[1]
+    @test isapprox(gz, generate_logdet_grad_points(prob); rtol = 1e-10)
+
+    gz2 = Zygote.gradient(P -> inv_quadratic_loss_of_points(prob, P, data), X)[1]
+    @test isapprox(gz2, generate_inv_loss_grad_points(prob, data); rtol = 1e-10)
+
+    # Full GP-likelihood point gradient (both terms) composes.
+    gz3 = Zygote.gradient(P -> logdet_of_points(prob, P) +
+        inv_quadratic_loss_of_points(prob, P, data), X)[1]
+    @test isapprox(gz3, generate_logdet_grad_points(prob) .+
+        generate_inv_loss_grad_points(prob, data); rtol = 1e-10)
+end
+
 @testset "d/dpoints (inverse loss) vs continuous finite differences" begin
     using GraphGP: cov_lookup
     using LinearAlgebra: norm, cholesky, Symmetric, LowerTriangular, UpperTriangular

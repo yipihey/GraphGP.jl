@@ -36,6 +36,7 @@ export query_preceding_neighbors, quantize_to_lattice, check_graph
 export query_preceding_neighbors_ka, build_tree_ka, order_by_depth_ka, build_graph_ka
 # Phase 10: differentiability (ChainRules entry points)
 export logdet_of_vals, inv_quadratic_loss_of_vals, generate_grad_xi
+export logdet_of_points, inv_quadratic_loss_of_points
 export refine_logdet_grad_points, generate_logdet_grad_points
 export refine_inv_loss_grad_points, generate_inv_loss_grad_points
 

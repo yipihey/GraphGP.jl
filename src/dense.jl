@@ -39,6 +39,33 @@ function _assemble_dense_cov(coords::AbstractMatrix{UInt32}, scale::T,
     return K
 end
 
+# Robust lower-Cholesky factor of a dense covariance block. Small n0 blocks of highly
+# correlated points can be numerically non-positive-definite even with the kernel's built-in
+# jitter; rather than throwing, retry with escalating diagonal jitter (relative to the mean
+# diagonal). Non-mutating so the caller keeps `K`.
+function _dense_chol_L(K::AbstractMatrix{T}) where {T}
+    F = LinearAlgebra.cholesky(LinearAlgebra.Symmetric(K, :L); check = false)
+    LinearAlgebra.issuccess(F) && return F.L
+    n = size(K, 1)
+    dmean = zero(T)
+    @inbounds for i in 1:n
+        dmean += K[i, i]
+    end
+    dmean = dmean / max(n, 1)
+    Kj = Matrix{T}(K)
+    eps = T(1e-9)
+    while eps <= T(1e-2)
+        @inbounds for i in 1:n
+            Kj[i, i] = K[i, i] + eps * dmean
+        end
+        F = LinearAlgebra.cholesky(LinearAlgebra.Symmetric(Kj, :L); check = false)
+        LinearAlgebra.issuccess(F) && return F.L
+        eps *= T(10)
+    end
+    error("dense first-layer covariance is not positive definite even with 1e-2 relative " *
+          "jitter; increase the kernel `jitter` or reduce n0")
+end
+
 """
     compute_cov_matrix(coords_a, coords_b, scale, bins, vals) -> Matrix
     compute_cov_matrix(prob::GraphGPProblem) -> Matrix
@@ -87,7 +114,7 @@ function generate_dense(coords::AbstractMatrix{UInt32}, scale::T,
     xi = Array(xi)                       # host LAPACK path (small dense block)
     n0 = length(xi)
     K = _assemble_dense_cov(coords, scale, bins, vals, n0)
-    L = LinearAlgebra.cholesky!(LinearAlgebra.Symmetric(K, :L)).L
+    L = _dense_chol_L(K)
     return L * xi
 end
 
@@ -102,7 +129,7 @@ function generate_dense_inv(coords::AbstractMatrix{UInt32}, scale::T,
     values = Array(values)               # host LAPACK path (small dense block)
     n0 = length(values)
     K = _assemble_dense_cov(coords, scale, bins, vals, n0)
-    L = LinearAlgebra.cholesky!(LinearAlgebra.Symmetric(K, :L)).L
+    L = _dense_chol_L(K)
     return LinearAlgebra.LowerTriangular(L) \ values
 end
 
@@ -115,7 +142,7 @@ Matches `refine.py:generate_dense_logdet`.
 function generate_dense_logdet(coords::AbstractMatrix{UInt32}, scale::T,
         bins::AbstractVector, vals::AbstractVector, n0::Int) where {T}
     K = _assemble_dense_cov(coords, scale, bins, vals, n0)
-    L = LinearAlgebra.cholesky!(LinearAlgebra.Symmetric(K, :L)).L
+    L = _dense_chol_L(K)
     return sum(log, LinearAlgebra.diag(L))
 end
 
@@ -130,7 +157,7 @@ function _dense_logdet_grad_vals(prob::GraphGPProblem{T}) where {T}
     coords_n0 = Array(view(prob.coords, :, 1:n0))   # host (small dense block)
     bins = Array(prob.bins)
     K = _assemble_dense_cov(coords_n0, prob.scale, bins, prob.vals, n0)
-    L = LinearAlgebra.cholesky!(LinearAlgebra.Symmetric(K, :L)).L
+    L = _dense_chol_L(K)
     Linv = Matrix(LinearAlgebra.inv(LinearAlgebra.LowerTriangular(L)))
     dv = zeros(T, nb)
     for b in 1:n0
@@ -167,7 +194,7 @@ function _dense_logdet_grad_points(prob::GraphGPProblem{T}) where {T}
     bins = Array(prob.bins)
     vals = Array(prob.vals)
     K = _assemble_dense_cov(coords_n0, prob.scale, bins, vals, n0)
-    L = LinearAlgebra.cholesky!(LinearAlgebra.Symmetric(K, :L)).L
+    L = _dense_chol_L(K)
     Linv = Matrix(LinearAlgebra.inv(LinearAlgebra.LowerTriangular(L)))
     dpts = zeros(T, D, N)
     @inbounds for b in 1:n0
@@ -205,7 +232,7 @@ function _dense_inv_alpha(prob::GraphGPProblem{T}, data_dense) where {T}
     bins = Array(prob.bins)
     vals = Array(prob.vals)
     K = _assemble_dense_cov(coords_n0, prob.scale, bins, vals, n0)
-    L = LinearAlgebra.cholesky!(LinearAlgebra.Symmetric(K, :L)).L
+    L = _dense_chol_L(K)
     Lt = LinearAlgebra.LowerTriangular(L)
     xi = Lt \ Array(data_dense)          # L⁻¹ y
     alpha = transpose(Lt) \ xi           # L⁻ᵀ xi = K⁻¹ y

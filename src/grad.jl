@@ -432,7 +432,7 @@ function generate_grad_xi(prob::GraphGPProblem{T}, vbar::AbstractVector;
     bins = Array(prob.bins)
     vals = Array(prob.vals)
     Kd = _assemble_dense_cov(coords_n0, prob.scale, bins, vals, n0)
-    L = LinearAlgebra.cholesky!(LinearAlgebra.Symmetric(Kd, :L)).L
+    L = _dense_chol_L(Kd)
     xg[1:n0] = transpose(L) * vb[1:n0]
 
     return _move_to_backend(xg, backend)

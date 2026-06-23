@@ -111,7 +111,8 @@ an arbitrary user loss), Python is more flexible.
 | `check_graph` | ✅ implemented + tested (`graph_build.jl`) |
 | `compute_cov_matrix` | ✅ implemented + tested (`dense.jl`) |
 | README stale claim | ✅ corrected; Differentiability section added |
-| AD: ChainRules over `cov_vals`/hyperparameters | ✅ `logdet_of_vals`, `inv_quadratic_loss_of_vals` rrules (Zygote-composable) |
+| AD: ChainRules over `cov_vals`/hyperparameters/`xi`/points | ✅ `logdet_of_vals`/`inv_quadratic_loss_of_vals` (cov_vals → hyperparams), `generate` (xi), `logdet_of_points`/`inv_quadratic_loss_of_points` (points) — all Zygote-composable for both GP-likelihood terms |
+| Dense first-layer robustness | ✅ `_dense_chol_L`: jittered-Cholesky fallback (escalating diagonal jitter) so ill-conditioned `n0` blocks no longer throw `PosDefException` |
 | AD: `d/dxi` | ✅ `generate_grad_xi` + `generate` rrule (exact; adjoint identity to machine ε) |
 | AD: `d/dpoints` (logdet) | ✅ `generate_logdet_grad_points` (validated vs continuous FD) |
 | AD: `d/dpoints` (inverse loss) | ✅ `generate_inv_loss_grad_points` (validated vs continuous FD); fixed a latent bug in the dense inverse-loss grad (used `L⁻¹y` where it needs `α=K⁻¹y`) |
@@ -125,13 +126,14 @@ an arbitrary user loss), Python is more flexible.
 | Fully-fused on-device build (`build_graph_ka`) | ✅ tree → query → depths → reorder → quantize entirely on `backend`, returns a device-resident `GraphGPProblem` (no host round-trip). 200 K in ~340 ms, 1 M in ~2.1 s; validated by `check_graph` + generate/inverse roundtrip |
 | Latent dense-logdet-gradient 2× bug | ✅ found and fixed (was untested against truth) |
 
-**Still open (minor / low-priority):**
-- **Dense first-layer conditioning** — the dense `n0 × n0` Cholesky (host LAPACK) can fail
-  (`PosDefException`) for large `n0` (≈1000) with a small-scale RBF kernel and little jitter;
-  this is a pre-existing numerical limitation of the dense path, independent of the GPU work.
-- **General-purpose AD breadth** — AD is analytic and restricted to the implemented losses
-  (`logdet`, `0.5‖xi‖²`) w.r.t. `cov_vals`/hyperparameters, `xi`, and points; arbitrary
-  user losses compose via the ChainRules entry points but only through those primitives.
+**Status:** all audit gaps and the follow-ups are closed. The package has full Python-`graphgp`
+feature coverage and a complete, end-to-end on-device GPU path, with an analytic AD surface
+(cov_vals, hyperparameters, xi, points for both GP-likelihood terms) composable through
+ChainRules/Zygote. The only intrinsic design choice that remains (not a defect) is that AD is
+**analytic**: it covers those two likelihood primitives rather than arbitrary autodiff of any
+intermediate — by construction, since coordinates live on an integer lattice and the kernels
+are hand-written. Possible future work is purely performance (e.g. a non-sort radix tree build,
+or a warp-cooperative query) — neither is a coverage gap.
 - **Query throughput**: now ~4.7 M pts/s (Float32 packed records + index-range skip). Still
   below the refine kernels (~150 M pts/s) — irregular per-query tree traversal is latency-bound
   on dependent node reads. Diagnostics ruled out occupancy (stack-size) and coalescing
