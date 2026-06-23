@@ -54,6 +54,37 @@ end
     end
 end
 
+@testset "build_tree_ka produces a valid k-d tree (CPU backend)" begin
+    # Brute-force preceding k-NN over the tree-ordered points; a valid k-d tree + query must
+    # reproduce it exactly (set-wise).
+    function brute_preceding(spts, n0, k)
+        D, N = size(spts)
+        nb = zeros(Int, k, N - n0)
+        for m in (n0 + 1):N
+            ds = [(sum(abs2, @view(spts[:, j]) .- @view(spts[:, m])), j) for j in 1:(m - 1)]
+            sort!(ds)
+            for i in 1:k
+                nb[i, m - n0] = ds[i][2]
+            end
+        end
+        nb
+    end
+    rng = Random.MersenneTwister(2)
+    for (N, D, n0, k) in ((500, 3, 50, 8), (1200, 2, 40, 6))
+        pts = randn(rng, D, N)                       # (D, N)
+        spts, seg_lo, seg_hi, split_dim, perm = build_tree_ka(pts)
+        @test sort(perm) == collect(1:N)             # perm is a permutation
+        @test spts ≈ pts[:, perm]                    # points are reordered, not modified
+        nbq = query_preceding_neighbors_ka(spts, seg_lo, seg_hi, split_dim, n0, k)
+        nbb = brute_preceding(spts, n0, k)
+        mism = 0
+        for m in 1:(N - n0)
+            Set(nbq[:, m]) == Set(nbb[:, m]) || (mism += 1)
+        end
+        @test mism == 0
+    end
+end
+
 @testset "build_graph smoke: valid GP structure" begin
     # Build a graph from scratch, run refine_logdet, check it's finite.
     rng = Random.MersenneTwister(99)

@@ -27,23 +27,34 @@ spts = permutedims(sorted_pts)              # (D, N) Float64
 M = N - n0
 
 @printf("graph-build bench: N=%d M=%d K=%d D=%d\n", N, M, K, D)
-@printf("  build_tree (CPU, 1 thread) : %8.1f ms\n", 1e3 * t_tree)
+@printf("  build_tree    (CPU, BFS)        : %8.1f ms\n", 1e3 * t_tree)
 
-function bench_gpu_query(spts, seg_lo, seg_hi, split_dim, n0, K, M)
+function bench_gpu(pts_DxN, spts, seg_lo, seg_hi, split_dim, n0, K, M)
+    # GPU sort-based build_tree_ka over the (D, N) points.
+    g = CuArray(pts_DxN)
+    bt() = build_tree_ka(g)
+    CUDA.@sync bt()                          # warmup / compile
+    bbest = Inf
+    for _ in 1:3
+        bbest = min(bbest, CUDA.@elapsed bt())
+    end
+    @printf("  build_tree_ka (GPU, sort)       : %8.1f ms\n", 1e3 * bbest)
+
+    # GPU k-NN query over the tree (moved to the device).
     spts_g = CuArray(spts)
     lo_g = CuArray(seg_lo); hi_g = CuArray(seg_hi); sd_g = CuArray(split_dim)
     qgpu() = query_preceding_neighbors_ka(spts_g, lo_g, hi_g, sd_g, n0, K)
-    CUDA.@sync qgpu()                       # warmup / compile
-    best = Inf
+    CUDA.@sync qgpu()
+    qbest = Inf
     for _ in 1:3
-        best = min(best, CUDA.@elapsed qgpu())
+        qbest = min(qbest, CUDA.@elapsed qgpu())
     end
-    @printf("  query_ka   (GPU, %-16s) : %8.1f ms   %7.2f M pts/s\n",
-        CUDA.name(CUDA.device()), 1e3 * best, M / best / 1e6)
+    @printf("  query_ka      (GPU, %-12s) : %8.1f ms   %7.2f M pts/s\n",
+        CUDA.name(CUDA.device()), 1e3 * qbest, M / qbest / 1e6)
 end
 
 if CUDA.functional()
-    bench_gpu_query(spts, seg_lo, seg_hi, split_dim, n0, K, M)
+    bench_gpu(permutedims(pts), spts, seg_lo, seg_hi, split_dim, n0, K, M)
 else
-    println("  (no functional CUDA device; GPU query skipped)")
+    println("  (no functional CUDA device; GPU steps skipped)")
 end

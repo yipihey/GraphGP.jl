@@ -90,6 +90,32 @@ let cuda_ok = false
                 @test mism == 0
             end
 
+            @testset "GPU build_tree_ka produces a valid k-d tree" begin
+                function brute_preceding(spts, n0, k)
+                    D, N = size(spts)
+                    nb = zeros(Int, k, N - n0)
+                    for m in (n0 + 1):N
+                        ds = [(sum(abs2, @view(spts[:, j]) .- @view(spts[:, m])), j) for j in 1:(m - 1)]
+                        sort!(ds)
+                        for i in 1:k
+                            nb[i, m - n0] = ds[i][2]
+                        end
+                    end
+                    nb
+                end
+                N, D, n0, k = 2000, 3, 50, 8
+                pts = randn(MersenneTwister(2), D, N)
+                spts, lo, hi, sd, perm = build_tree_ka(CuArray(pts))   # GPU sort-based build
+                @test sort(Array(perm)) == collect(1:N)
+                nbq = Array(query_preceding_neighbors_ka(spts, lo, hi, sd, n0, k))
+                nbb = brute_preceding(Array(spts), n0, k)
+                mism = 0
+                for m in 1:(N - n0)
+                    Set(nbq[:, m]) == Set(nbb[:, m]) || (mism += 1)
+                end
+                @test mism == 0
+            end
+
             @testset "GPU end-to-end: build on CPU, run on GPU (to_backend)" begin
                 rng = MersenneTwister(77)
                 N, D, n0, k = 1500, 3, 40, 8

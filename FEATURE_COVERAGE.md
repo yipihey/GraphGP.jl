@@ -117,19 +117,19 @@ an arbitrary user loss), Python is more flexible.
 | GPU compute path (generate/inverse/logdet/grad) | ✅ works end-to-end; validated in CI GPU testset |
 | `to_backend` (build on CPU, run on GPU) | ✅ |
 | GPU `compute_depths` / `quantize_to_lattice` | ✅ backend-dispatched KA |
-| GPU k-NN query (`query_preceding_neighbors_ka`) | ✅ CPU+GPU, exact-set parity with the scalar reference |
+| GPU k-NN query (`query_preceding_neighbors_ka`) | ✅ CPU+GPU; AABB + index-range skip; exact-set parity with the scalar reference (~8× faster than the first version at 200 K) |
+| GPU `build_tree` (`build_tree_ka`) | ✅ sort-based level build (one global `sortperm`/level), CPU+GPU; valid k-d tree (brute-force-validated); ~29× faster than the CPU BFS build at 200 K |
 | Latent dense-logdet-gradient 2× bug | ✅ found and fixed (was untested against truth) |
 
 **Still open (clearly scoped follow-ups):**
-- **GPU `build_tree` / `order_by_depth`** — the k-d tree skeleton + depth reordering still run
-  on the CPU; the GPU path builds the tree on the host, then runs query/depths/quantize on the
-  device and returns a device-resident `GraphGPProblem` (so the *dominant* query cost and all
-  compute are on GPU). A from-scratch sort-based GPU `build_tree` (mirroring the data-parallel
-  JAX `_build_tree`, with `sort!`/`sortperm` in a `CUDA` package extension) is the remaining
-  piece for a 100%-on-device build. Note GPU graph construction will not be byte-identical to
-  the CPU tree (f32 sort keys / tie handling), so validate by neighbor-set/equivalent-GP rather
-  than exact match.
+- **GPU `order_by_depth` + fully-fused `build_graph`** — `build_tree_ka`, the GPU query, GPU
+  `compute_depths`, and GPU `quantize_to_lattice` all exist; the remaining piece is a GPU
+  `order_by_depth` (depth argsort + neighbor remap) and an orchestration that chains them to
+  return a device-resident `GraphGPProblem` with no host round-trip. (`order_by_depth` is cheap
+  — depths argsort — and can run on the host meanwhile.) Note a GPU-built tree is not
+  byte-identical to the CPU tree (tie-breaking + fractional sort key), so it is validated by
+  brute-force/equivalent-k-NN, not exact match.
 - **`d/dpoints` for the inverse-quadratic loss**, and GPU (atomic-scatter) variants of the
   point gradients (current point-gradient path is CPU/host accumulation).
-- **CUDA package extension** to host the GPU sort primitives once `build_tree`/`order_by_depth`
-  move to the device (keeps the core CUDA-free).
+- **Sort primitive:** `build_tree_ka` uses generic `sortperm`, which dispatches to the CUDA
+  method at run time — so no CUDA package extension was needed to keep the core CUDA-free.

@@ -96,26 +96,31 @@ logdet at 20 M (ref ~7% ahead); it now *beats* the reference on both ops at 5 M 
 graph was, if anything, mildly pessimistic for it. Conclusions are unchanged from the
 synthetic case.
 
-## Graph construction (GPU k-NN query)
+## Graph construction (GPU build_tree + GPU k-NN query)
 
-The graph-build pipeline is implemented in Julia. The k-d tree skeleton (`build_tree`) is
-currently built on the CPU; the **k-NN query** (`query_preceding_neighbors_ka`) runs on the
-GPU (KernelAbstractions), validated to produce the same neighbor sets as the scalar reference.
+The graph-build pipeline is implemented in Julia and now runs on the GPU:
+- **`build_tree_ka`** — sort-based k-d tree build (one global sort per level via the GPU
+  `sortperm`); a valid k-d tree (validated against brute-force preceding k-NN).
+- **`query_preceding_neighbors_ka`** — k-NN query, pruned by the tight per-node AABB *and* an
+  index-range skip (`seg_lo ≥ m` ⇒ subtree has no preceding points), validated to match the
+  scalar reference's neighbor sets.
+
 RTX A6000, `K=10`, `D=3`, `n0=1000`:
 
-| N | build_tree (CPU) | GPU query |
-| --- | --- | --- |
-| 50 K  | 1.7 s | 75 ms (0.65 M pts/s) |
-| 100 K | — | 185 ms |
-| 200 K | 4.4 s | 492 ms (0.4 M pts/s) |
+| N | build_tree (CPU, BFS) | build_tree_ka (GPU) | GPU query |
+| --- | --- | --- | --- |
+| 50 K  | 1.7 s | — | 16 ms |
+| 100 K | — | — | 33 ms (3.0 M pts/s) |
+| 200 K | 4.4 s | **150 ms** (~29×) | 63 ms (3.1 M pts/s) |
+| 1 M   | ~25 s | **0.90 s** | — |
 
 Reproduce: `julia --project=julia/GraphGP/bench julia/GraphGP/test/bench_build.jl 200000 10 3`.
 
-The GPU query is correct but **not yet throughput-optimized**: it prunes against a static
-full-segment AABB, which is loose at scale (hence ~0.5 M pts/s, far below the refine kernels'
-~150 M pts/s). A tighter split-plane bound, plus moving `build_tree`/`order_by_depth` onto the
-GPU (sort-based, in a CUDA package extension), are the planned next steps for a fully
-on-device build. See `FEATURE_COVERAGE.md` for status.
+The index-range skip sped the query up ~8× at 200 K (492 ms → 63 ms); the GPU build is ~29×
+faster than the CPU BFS build at 200 K. (A tried split-plane *bound* was tighter on paper but
+the per-node AABB is in fact a tighter cell bound; the decisive win for the Vecchia
+preceding-neighbor query is the index-range skip.) Remaining: GPU `order_by_depth` and a fully
+fused on-device `build_graph` orchestration — see `FEATURE_COVERAGE.md`.
 
 ## Takeaways
 
