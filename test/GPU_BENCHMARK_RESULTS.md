@@ -10,6 +10,36 @@
 **Workload:** synthetic graph, `K=10` neighbors, `D=3`, `n0=1000`, `M = N − n0` refined
 points. Float32 throughout. Median of repeated runs, device-synchronized.
 
+## Performance tuning pass (A6000)
+
+A benchmark-driven optimization pass. Before → after at N=1M (K=10, D=3, f32):
+
+| Op | Before | After | Change |
+| --- | --- | --- | --- |
+| `refine_logdet` | 160 M pts/s | **180 M pts/s** | +12% |
+| `refine_inv` | 142 M pts/s | **154 M pts/s** | +8% |
+| `query_preceding_neighbors_ka` | 4.7 M pts/s (200K) | **25.9 M pts/s (200K)** | **5.5×** |
+| `refine_logdet_grad_points` (GPU) | 31 M pts/s | **27 M pts/s** ¹ | wg=256 |
+| `build_graph_ka` end-to-end | 1.38 s | **1.00 s** | −28% |
+
+Levers (each measured):
+- **Workgroup size 64 → 32** (one warp/block). The private-memory-heavy kernels (the
+  `(k+1)²` matrix; the query's DFS stack) are occupancy-limited; the smallest block maximizes
+  warps in flight. Lifted `refine_logdet`/`refine_inv` ~8–12% and the query *kernel* ~50%.
+- **Bottom-up AABB in the query pack.** The old node-pack scanned each node's segment (one
+  workitem/node → the root scanned all N in one thread, ~85% of query time). Replaced by a
+  parallel leaf-init + deepest→root child-box merge — O(N). This is what makes the query 5.5×.
+- **`_wgsize_scatter=256`** for the atomic-scatter point-gradient kernels (their scatter target
+  is large, so atomic latency hides better with more threads).
+
+¹ point-grad throughput is similar at wg=256 vs the previous 64; the win is over the wg=32
+default the other kernels use (33.7→38 M/s at K=10), and it remains ~167× over the CPU host path.
+
+Gradient w.r.t. `cov_vals` (~40 M pts/s) was diagnosed as ~50% analytic-Cholesky-pullback
+compute and ~50% off-diagonal atomic scatter into the small `d_vals` (the diagonal is already
+coalesced to one atomic/point). A shared-memory block histogram could recover much of the
+scatter half (best case ~1.5×) — a documented, bounded future option.
+
 Three implementations compared:
 1. **GraphGP.jl** — KernelAbstractions/CUDA.jl, one workitem per point, matrix in private memory.
 2. **JAX (pure)** — `cuda=False`; materializes the full `(M, K+1, K+1)` conditioning tensor.
@@ -107,10 +137,10 @@ The graph-build pipeline is implemented in Julia and now runs on the GPU:
 
 RTX A6000, `K=10`, `D=3`, `n0=1000`:
 
-| N | build_tree (CPU, BFS) | build_tree_ka (GPU) | GPU query |
+| N | build_tree (CPU, BFS) | build_tree_ka (GPU) | GPU query (bottom-up pack + wg=32) |
 | --- | --- | --- | --- |
-| 100 K | — | — | 22 ms (4.6 M pts/s) |
-| 200 K | 4.4 s | **39 ms** (~110×) | 42 ms (4.7 M pts/s) |
+| 100 K | — | — | 4.1 ms (24.4 M pts/s) |
+| 200 K | 4.4 s | **39 ms** (~110×) | 7.7 ms (25.9 M pts/s) |
 | 1 M   | ~25 s | **0.19 s** | — |
 | 5 M   | — | 1.3 s | — |
 | 20 M  | — | 7.2 s | — |
@@ -126,22 +156,21 @@ Reproduce: `julia --project=julia/GraphGP/bench julia/GraphGP/test/bench_build.j
 
 Query throughput evolution at 200 K: 0.4 M pts/s (initial, loose AABB over all points) → 3.1
 (index-range skip: skip subtrees with no preceding points, the decisive Vecchia prune) → 4.7
-(Float32 geometry in a packed per-node record). Controlled experiments showed the query is
-neither occupancy-bound (halving the per-thread stack changed nothing) nor coalescing-bound
-(packing the node record changed nothing); the remaining lever was precision — the A6000's f64
-throughput is ~1/32 of f32, so packing the geometry as Float32 (positions kept exact as Int32)
-gave ~1.5×. Each node is read as one contiguous Int32 record `[lo, hi, split_dim, split_val,
-min(D), max(D)]` with the float fields bit-reinterpreted. (Queries run on tree-ordered points,
-so intra-warp divergence is already low — a warp-cooperative scheme was not the effective
-lever here.) The GPU build is ~29× faster than the CPU BFS build at 200 K.
+(Float32 geometry in a packed per-node record) → **25.9** (bottom-up AABB pack, removing the
+per-node segment scan, + workgroup size 32). The Float32 packed record reads each node as one
+contiguous Int32 `[lo, hi, split_dim, split_val, min(D), max(D)]` (float fields
+bit-reinterpreted; positions exact Int32; A6000 f64 throughput is ~1/32 of f32). The bottom-up
+pack is the big one: the prior pack scanned each node's segment (root scanned all N in one
+thread, ~85% of query time); replacing it with a parallel leaf-init + deepest→root box merge
+(O(N)) gave the final 4.7→25.9 jump. The GPU build is ~29× faster than the CPU BFS build at 200 K.
 
 **Fully fused on-device build** (`build_graph_ka`: tree → query → depths → reorder → quantize,
 all on the GPU, returning a device-resident `GraphGPProblem`):
 
 | N | build_graph_ka (GPU, end-to-end) |
 | --- | --- |
-| 200 K | **0.23 s** |
-| 1 M | **1.4 s** |
+| 200 K | **0.18 s** |
+| 1 M | **1.0 s** |
 
 (The CPU `build_graph` is tens of seconds at 200 K — `build_tree` alone is 4.4 s plus the
 scalar O(N²) query.) Validated by `check_graph` + generate/inverse roundtrip. So
