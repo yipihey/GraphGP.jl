@@ -17,7 +17,7 @@ Three implementations compared:
 
 Reproduce:
 ```bash
-julia --project=julia/GraphGP julia/GraphGP/test/bench_gpu.jl  <N> 10 3   # GraphGP.jl
+julia --project=julia/GraphGP/bench julia/GraphGP/test/bench_gpu.jl  <N> 10 3   # GraphGP.jl
 python julia/GraphGP/test/bench_jax.py                         <N> 10 3   # pure JAX
 python julia/GraphGP/test/bench_jax_cuda.py                    <N> 10 3   # reference CUDA
 ```
@@ -66,7 +66,7 @@ points. Cross-check at N=200 K: reference CUDA logdet = −583769.7, GraphGP.jl 
 Reproduce:
 ```bash
 python julia/GraphGP/test/bench_realgraph.py <N> 10 3 /tmp/rg.npz   # builds+dumps+benches JAX & CUDA
-julia --project=julia/GraphGP julia/GraphGP/test/bench_realgraph.jl /tmp/rg.npz   # GraphGP.jl on same graph
+julia --project=julia/GraphGP/bench julia/GraphGP/test/bench_realgraph.jl /tmp/rg.npz   # GraphGP.jl on same graph
 ```
 
 `refine_logdet` — throughput (M pts·s⁻¹):

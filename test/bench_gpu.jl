@@ -1,6 +1,6 @@
 # Benchmark the Julia GraphGP kernels on the CUDA GPU backend (KernelAbstractions + CUDA.jl).
 #
-#   julia --project=julia/GraphGP julia/GraphGP/test/bench_gpu.jl [N] [K] [D]
+#   julia --project=julia/GraphGP/bench julia/GraphGP/test/bench_gpu.jl [N] [K] [D]
 #
 # Mirrors test/bench.jl but moves the per-kernel array fields onto the GPU so the
 # KernelAbstractions backend dispatches to CUDA. Reports median wall time and throughput

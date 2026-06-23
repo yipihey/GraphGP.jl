@@ -1,7 +1,7 @@
 # Benchmark GraphGP.jl on the GPU using a REAL gp.build_graph-derived graph dumped by
 # bench_realgraph.py (so all implementations share identical spatially-coherent neighbors).
 #
-#   julia --project=julia/GraphGP julia/GraphGP/test/bench_realgraph.jl <dump_path.npz>
+#   julia --project=julia/GraphGP/bench julia/GraphGP/test/bench_realgraph.jl <dump_path.npz>
 
 using GraphGP
 using KernelAbstractions
