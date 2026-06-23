@@ -70,3 +70,60 @@ end
     gz2 = Zygote.gradient(x -> sum(abs2, generate(prob, x)) / 2, xr)[1]
     @test isapprox(gz2, generate_grad_xi(prob, generate(prob, xr)); rtol = 1e-8)
 end
+
+@testset "d/dpoints (generate_logdet) vs continuous finite differences" begin
+    using GraphGP: cov_lookup
+    using LinearAlgebra: norm, diag, cholesky, Symmetric
+    rng = Random.MersenneTwister(13)
+    N, D, n0, k = 200, 3, 16, 6
+    pts = randn(rng, N, D)
+    bins, vals = rbf_kernel(Float64(1.0), Float64(0.5), 1e-4, 1e1, 400; jitter = Float64(1e-3))
+    nbn = length(bins)
+    prob = build_graph(pts, n0, k, bins, vals)
+    coords = Array(prob.coords)
+    nbr = Array(prob.neighbors)
+    M = nrefined(prob)
+    X = prob.scale .* Float64.(coords)   # dequantized positions (D, N), tree order
+
+    # Continuous-position forward: dense 0.5·log|K| over the first n0, plus the per-point
+    # refinement log-std. Matches generate_logdet at X = scale·coords.
+    function fwd(X)
+        s = 0.0
+        Kd = zeros(n0, n0)
+        for i in 1:n0, j in 1:n0
+            Kd[i, j] = cov_lookup(norm(@view(X[:, i]) .- @view(X[:, j])), bins, vals, nbn)
+        end
+        s += sum(log, diag(cholesky(Symmetric(Kd, :L)).L))
+        A = zeros(k + 1, k + 1)
+        for m in 1:M
+            idx = ntuple(j -> j <= k ? nbr[j, m] : n0 + m, k + 1)
+            for i in 1:(k + 1), j in 1:(k + 1)
+                A[i, j] = cov_lookup(norm(@view(X[:, idx[i]]) .- @view(X[:, idx[j]])), bins, vals, nbn)
+            end
+            s += log(cholesky(Symmetric(A, :L)).L[k + 1, k + 1])
+        end
+        s
+    end
+
+    @test isapprox(fwd(X), generate_logdet(prob); rtol = 1e-10)
+    gp = generate_logdet_grad_points(prob)
+    @test size(gp) == (D, N)
+    for (p, d) in ((3, 1), (12, 2), (n0 + 5, 1), (n0 + 60, 3), (n0 + 150, 2))
+        h = 1e-6
+        Xp = copy(X); Xp[d, p] += h
+        Xm = copy(X); Xm[d, p] -= h
+        fd = (fwd(Xp) - fwd(Xm)) / (2h)
+        @test isapprox(gp[d, p], fd; rtol = 2e-3, atol = 1e-6)
+    end
+
+    # Regression: the dense first-layer logdet grad w.r.t. cov_vals (FD of generate_dense_logdet).
+    cn0 = view(prob.coords, :, 1:n0)
+    gv = GraphGP._dense_logdet_grad_vals(prob)
+    f(v) = generate_dense_logdet(cn0, prob.scale, bins, v, n0)
+    for j in findall(!=(0), gv)[1:3]
+        h = 1e-6 * max(abs(vals[j]), 1e-3)
+        v1 = copy(vals); v1[j] += h
+        v2 = copy(vals); v2[j] -= h
+        @test isapprox(gv[j], (f(v1) - f(v2)) / (2h); rtol = 2e-3, atol = 1e-6)
+    end
+end

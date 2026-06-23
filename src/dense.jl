@@ -119,9 +119,10 @@ function generate_dense_logdet(coords::AbstractMatrix{UInt32}, scale::T,
     return sum(log, LinearAlgebra.diag(L))
 end
 
-# Gradient of generate_dense_logdet w.r.t. vals.
-# Uses d(log|K|)/d(K[a,b]) = K^{-1}[a,b] (diagonal) or 2*K^{-1}[a,b] (off-diagonal),
-# scattered through cov_lookup weights. K^{-1} = (L^{-1})^T * L^{-1}.
+# Gradient of generate_dense_logdet = 0.5·log|K| w.r.t. vals.
+# d(0.5 log|K|)/d(cov(r_ab)) = 0.5·K^{-1}[a,a] on the diagonal, and K^{-1}[a,b] off-diagonal
+# (the off-diagonal scalar cov sets both K[a,b] and K[b,a], contributing 0.5·(Kinv_ab+Kinv_ba)
+# = Kinv_ab). K^{-1} = (L^{-1})^T·L^{-1}. Scattered through cov_lookup weights.
 function _dense_logdet_grad_vals(prob::GraphGPProblem{T}) where {T}
     n0 = prob.n0
     D = ndims_space(prob)
@@ -146,12 +147,54 @@ function _dense_logdet_grad_vals(prob::GraphGPProblem{T}) where {T}
             end
             r = sqrt(T(sq)) * prob.scale
             lo, wlo, whi = cov_lookup_weights(r, bins, nb)
-            g = a == b ? Kinv_ab : 2 * Kinv_ab
+            g = a == b ? T(0.5) * Kinv_ab : Kinv_ab
             dv[lo] += g * wlo
             dv[lo + 1] += g * whi
         end
     end
     return dv
+end
+
+# Gradient of generate_dense_logdet w.r.t. the (dequantized) positions of the first n0 points.
+# Same cotangent g = 2·K⁻¹[a,b] on each off-diagonal covariance as the cov_vals path, then
+# propagated through k'(r)·dr/dx. Diagonal entries (r=0) are position-independent → skipped.
+function _dense_logdet_grad_points(prob::GraphGPProblem{T}) where {T}
+    n0 = prob.n0
+    D = ndims_space(prob)
+    nb = nbins(prob)
+    N = npoints(prob)
+    coords_n0 = Array(view(prob.coords, :, 1:n0))
+    bins = Array(prob.bins)
+    vals = Array(prob.vals)
+    K = _assemble_dense_cov(coords_n0, prob.scale, bins, vals, n0)
+    L = LinearAlgebra.cholesky!(LinearAlgebra.Symmetric(K, :L)).L
+    Linv = Matrix(LinearAlgebra.inv(LinearAlgebra.LowerTriangular(L)))
+    dpts = zeros(T, D, N)
+    @inbounds for b in 1:n0
+        for a in (b + 1):n0
+            Kinv_ab = zero(T)
+            for kk in 1:n0
+                Kinv_ab += Linv[kk, a] * Linv[kk, b]
+            end
+            sq = zero(Int64)
+            for d in 1:D
+                di = Int64(coords_n0[d, a]) - Int64(coords_n0[d, b])
+                sq += di * di
+            end
+            sq == 0 && continue
+            r = sqrt(T(sq)) * prob.scale
+            dcov = cov_lookup_dr(r, bins, vals, nb)
+            dcov == 0 && continue
+            factor = Kinv_ab * dcov / r          # off-diagonal cotangent = K⁻¹[a,b]
+            for d in 1:D
+                diff = prob.scale * (T(Int64(coords_n0[d, a])) - T(Int64(coords_n0[d, b])))
+                c = factor * diff
+                dpts[d, a] += c
+                dpts[d, b] -= c
+            end
+        end
+    end
+    return dpts
 end
 
 # Gradient of 0.5*||generate_dense_inv||^2 w.r.t. vals.

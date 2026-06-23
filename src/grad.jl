@@ -146,6 +146,78 @@ function generate_logdet_grad_vals(prob::GraphGPProblem{T};
 end
 
 """
+    refine_logdet_grad_points(prob) -> (D, N) matrix
+
+Gradient of `refine_logdet(prob)` with respect to the (dequantized, continuous) point
+positions `x = scale · coords` (tree/depth order). Coordinates are stored on an integer
+lattice for the fast forward path; this derivative treats the lattice straight-through, i.e.
+it differentiates the underlying continuous covariance `k(‖xₐ − x_b‖)` at the lattice points.
+
+Same per-point backward as the `cov_vals` adjoint (`assemble → Cholesky → chol pullback`),
+but each off-diagonal cotangent `Abar[a,b]` is propagated through `k'(r)·dr/dx` to the two
+points involved instead of into `cov_vals`. CPU implementation (host accumulation).
+"""
+function refine_logdet_grad_points(prob::GraphGPProblem{T}) where {T}
+    M = nrefined(prob)
+    K = nneighbors(prob)
+    D = ndims_space(prob)
+    N = npoints(prob)
+    n0 = prob.n0
+    nb = nbins(prob)
+    coords = Array(prob.coords)
+    neighbors = Array(prob.neighbors)
+    bins = Array(prob.bins)
+    vals = Array(prob.vals)
+    scale = prob.scale
+
+    dpts = zeros(T, D, N)
+    A = Matrix{T}(undef, K + 1, K + 1)
+    Abar = Matrix{T}(undef, K + 1, K + 1)
+    Lbar = Matrix{T}(undef, K + 1, K + 1)
+    jc = Matrix{UInt32}(undef, K + 1, D)
+    @inbounds for m in 1:M
+        _gather_joint!(jc, coords, neighbors, m, n0, Val(K), Val(D))
+        assemble_cov!(A, jc, Val(K + 1), Val(D), scale, bins, vals, nb)
+        chol_lower!(A, Val(K + 1))
+        chol_logdet_pullback!(Abar, Lbar, A, Val(K + 1), one(T))
+        for a in 2:(K + 1)
+            ga = a <= K ? neighbors[a, m] : n0 + m
+            for b in 1:(a - 1)
+                gb = b <= K ? neighbors[b, m] : n0 + m
+                sq = zero(Int64)
+                for dd in 1:D
+                    di = Int64(jc[a, dd]) - Int64(jc[b, dd])
+                    sq += di * di
+                end
+                sq == 0 && continue                  # coincident points: k'(0)=0, skip
+                r = sqrt(T(sq)) * scale
+                dcov = cov_lookup_dr(r, bins, vals, nb)
+                dcov == 0 && continue
+                factor = Abar[a, b] * dcov / r        # Abar carries the full symmetric pair
+                for dd in 1:D
+                    diff = scale * (T(Int64(jc[a, dd])) - T(Int64(jc[b, dd])))  # xₐ−x_b
+                    c = factor * diff
+                    dpts[dd, ga] += c
+                    dpts[dd, gb] -= c
+                end
+            end
+        end
+    end
+    return dpts
+end
+
+"""
+    generate_logdet_grad_points(prob) -> (D, N) matrix
+
+Gradient of the full `generate_logdet(prob)` (dense first layer + Vecchia refinement) with
+respect to the continuous point positions `x = scale · coords` (tree/depth order). See
+[`refine_logdet_grad_points`](@ref) for the straight-through-lattice convention.
+"""
+function generate_logdet_grad_points(prob::GraphGPProblem{T}) where {T}
+    return refine_logdet_grad_points(prob) .+ _dense_logdet_grad_points(prob)
+end
+
+"""
     generate_grad_xi(prob, vbar; backend) -> x̄
 
 Vector-Jacobian product of `generate(prob, xi)` with respect to `xi`, for an output cotangent
