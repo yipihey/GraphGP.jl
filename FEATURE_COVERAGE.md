@@ -114,6 +114,7 @@ an arbitrary user loss), Python is more flexible.
 | AD: ChainRules over `cov_vals`/hyperparameters | ✅ `logdet_of_vals`, `inv_quadratic_loss_of_vals` rrules (Zygote-composable) |
 | AD: `d/dxi` | ✅ `generate_grad_xi` + `generate` rrule (exact; adjoint identity to machine ε) |
 | AD: `d/dpoints` (logdet) | ✅ `generate_logdet_grad_points` (validated vs continuous FD) |
+| AD: `d/dpoints` (inverse loss) | ✅ `generate_inv_loss_grad_points` (validated vs continuous FD); fixed a latent bug in the dense inverse-loss grad (used `L⁻¹y` where it needs `α=K⁻¹y`) |
 | GPU compute path (generate/inverse/logdet/grad) | ✅ works end-to-end; validated in CI GPU testset |
 | `to_backend` (build on CPU, run on GPU) | ✅ |
 | GPU `compute_depths` / `quantize_to_lattice` | ✅ backend-dispatched KA |
@@ -124,8 +125,11 @@ an arbitrary user loss), Python is more flexible.
 | Latent dense-logdet-gradient 2× bug | ✅ found and fixed (was untested against truth) |
 
 **Still open (clearly scoped follow-ups):**
-- **`d/dpoints` for the inverse-quadratic loss**, and GPU (atomic-scatter) variants of the
-  point gradients (current point-gradient path is CPU/host accumulation).
+- **GPU (atomic-scatter) variants of the point gradients** — all four point-gradient paths
+  (`refine_logdet_grad_points`, `generate_logdet_grad_points`, `refine_inv_loss_grad_points`,
+  `generate_inv_loss_grad_points`) currently accumulate on the CPU/host; a GPU version would
+  scatter `Abar`-through-`k'(r)` into a device `d_points` with atomics (mirrors the existing
+  GPU `cov_vals` adjoint kernels).
 - **Query throughput**: now ~4.7 M pts/s (Float32 packed records + index-range skip). Still
   below the refine kernels (~150 M pts/s) — irregular per-query tree traversal is latency-bound
   on dependent node reads. Diagnostics ruled out occupancy (stack-size) and coalescing

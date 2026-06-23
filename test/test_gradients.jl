@@ -127,3 +127,61 @@ end
         @test isapprox(gv[j], (f(v1) - f(v2)) / (2h); rtol = 2e-3, atol = 1e-6)
     end
 end
+
+@testset "d/dpoints (inverse loss) vs continuous finite differences" begin
+    using GraphGP: cov_lookup
+    using LinearAlgebra: norm, cholesky, Symmetric, LowerTriangular, UpperTriangular
+    rng = Random.MersenneTwister(21)
+    N, D, n0, k = 220, 3, 16, 6
+    pts = randn(rng, N, D)
+    bins, vals = rbf_kernel(Float64(1.0), Float64(0.5), 1e-4, 1e1, 300; jitter = Float64(1e-3))
+    nbn = length(bins)
+    prob = build_graph(pts, n0, k, bins, vals)
+    nbr = Array(prob.neighbors)
+    M = nrefined(prob)
+    data = randn(rng, N)
+    dord = prob.indices === nothing ? data : data[prob.indices]   # tree/depth order
+    X = prob.scale .* Float64.(Array(prob.coords))                # continuous positions
+
+    # Continuous-position forward of 0.5·‖generate_inv‖² (dense L⁻¹y + per-point refinement).
+    function fwd(X)
+        Kd = zeros(n0, n0)
+        for i in 1:n0, j in 1:n0
+            Kd[i, j] = cov_lookup(norm(@view(X[:, i]) .- @view(X[:, j])), bins, vals, nbn)
+        end
+        xid = LowerTriangular(cholesky(Symmetric(Kd, :L)).L) \ dord[1:n0]
+        s = 0.5 * sum(abs2, xid)
+        A = zeros(k + 1, k + 1)
+        for m in 1:M
+            ix = ntuple(j -> j <= k ? nbr[j, m] : n0 + m, k + 1)
+            for i in 1:(k + 1), j in 1:(k + 1)
+                A[i, j] = cov_lookup(norm(@view(X[:, ix[i]]) .- @view(X[:, ix[j]])), bins, vals, nbn)
+            end
+            Lm = cholesky(Symmetric(A, :L)).L
+            mv = UpperTriangular(Lm[1:k, 1:k]') \ Lm[k + 1, 1:k]
+            xim = (dord[n0 + m] - sum(mv[j] * dord[nbr[j, m]] for j in 1:k)) / Lm[k + 1, k + 1]
+            s += 0.5 * xim^2
+        end
+        s
+    end
+
+    gp = generate_inv_loss_grad_points(prob, data)
+    @test size(gp) == (D, N)
+    for (p, d) in ((3, 1), (12, 2), (n0 + 5, 1), (n0 + 60, 3), (n0 + 150, 2))
+        h = 1e-6
+        Xp = copy(X); Xp[d, p] += h
+        Xm = copy(X); Xm[d, p] -= h
+        @test isapprox(gp[d, p], (fwd(Xp) - fwd(Xm)) / (2h); rtol = 2e-3, atol = 1e-6)
+    end
+
+    # Regression: dense inverse-loss grad w.r.t. cov_vals (α = K⁻¹y) vs FD of 0.5‖L⁻¹y‖².
+    gv = GraphGP._dense_inv_loss_grad_vals(prob, dord[1:n0])
+    cn0 = view(prob.coords, :, 1:n0)
+    f(v) = 0.5 * sum(abs2, generate_dense_inv(cn0, prob.scale, bins, v, dord[1:n0]))
+    for j in findall(!=(0), gv)[1:3]
+        h = 1e-6 * max(abs(vals[j]), 1e-3)
+        v1 = copy(vals); v1[j] += h
+        v2 = copy(vals); v2[j] -= h
+        @test isapprox(gv[j], (f(v1) - f(v2)) / (2h); rtol = 2e-3, atol = 1e-6)
+    end
+end

@@ -218,6 +218,115 @@ function generate_logdet_grad_points(prob::GraphGPProblem{T}) where {T}
 end
 
 """
+    refine_inv_loss_grad_points(prob, values) -> (D, N) matrix
+
+Gradient of the refinement inverse loss `0.5·‖refine_inv(prob, values)‖²` w.r.t. the
+(dequantized, continuous) point positions. Same per-point backward as the `cov_vals` adjoint
+(`_accumulate_inv_point_grad!`): recompute the forward, seed the Cholesky-factor cotangents
+from `d(0.5·xiₘ²)/d(std, mean_vec)`, run `chol_pullback!` to get `Abar`, then propagate each
+off-diagonal `Abar[a,b]` through `k'(r)·dr/dx` into the two points (instead of into `cov_vals`).
+CPU/host accumulation. `values` is in tree/depth order.
+"""
+function refine_inv_loss_grad_points(prob::GraphGPProblem{T}, values::AbstractVector) where {T}
+    M = nrefined(prob)
+    K = nneighbors(prob)
+    D = ndims_space(prob)
+    N = npoints(prob)
+    n0 = prob.n0
+    nb = nbins(prob)
+    coords = Array(prob.coords)
+    neighbors = Array(prob.neighbors)
+    bins = Array(prob.bins)
+    vals = Array(prob.vals)
+    y = Array(values)
+    scale = prob.scale
+
+    dpts = zeros(T, D, N)
+    A = Matrix{T}(undef, K + 1, K + 1)
+    Abar = Matrix{T}(undef, K + 1, K + 1)
+    Lbar = Matrix{T}(undef, K + 1, K + 1)
+    zbar = Vector{T}(undef, K)
+    mv = Vector{T}(undef, K)
+    jc = Matrix{UInt32}(undef, K + 1, D)
+    @inbounds for m in 1:M
+        _gather_joint!(jc, coords, neighbors, m, n0, Val(K), Val(D))
+        assemble_cov!(A, jc, Val(K + 1), Val(D), scale, bins, vals, nb)
+        chol_lower!(A, Val(K + 1))
+        mean_vec_solve!(mv, A, Val(K))
+        std = A[K + 1, K + 1]
+        mean_val = zero(T)
+        for j in 1:K
+            mean_val += mv[j] * y[neighbors[j, m]]
+        end
+        xi_m = (y[n0 + m] - mean_val) / std
+
+        # Seed the Cholesky-factor cotangents (identical to _accumulate_inv_point_grad!).
+        for j in 1:(K + 1), i in 1:(K + 1)
+            Lbar[i, j] = zero(T)
+        end
+        Lbar[K + 1, K + 1] = -xi_m * xi_m / std
+        for j in 1:K
+            zbar[j] = -xi_m * y[neighbors[j, m]] / std
+        end
+        for i in 1:K
+            s = zbar[i]
+            for p in 1:(i - 1)
+                s -= A[i, p] * zbar[p]
+            end
+            zbar[i] = s / A[i, i]
+        end
+        for j in 1:K
+            Lbar[K + 1, j] += zbar[j]
+            for i in 1:j
+                Lbar[j, i] -= zbar[i] * mv[j]
+            end
+        end
+        chol_pullback!(Abar, Lbar, A, Val(K + 1))
+
+        # Scatter Abar through k'(r)·dr/dx into the involved points (off-diagonal only).
+        for a in 2:(K + 1)
+            ga = a <= K ? neighbors[a, m] : n0 + m
+            for b in 1:(a - 1)
+                gb = b <= K ? neighbors[b, m] : n0 + m
+                sq = zero(Int64)
+                for dd in 1:D
+                    di = Int64(jc[a, dd]) - Int64(jc[b, dd])
+                    sq += di * di
+                end
+                sq == 0 && continue
+                r = sqrt(T(sq)) * scale
+                dcov = cov_lookup_dr(r, bins, vals, nb)
+                dcov == 0 && continue
+                factor = Abar[a, b] * dcov / r
+                for dd in 1:D
+                    diff = scale * (T(Int64(jc[a, dd])) - T(Int64(jc[b, dd])))
+                    c = factor * diff
+                    dpts[dd, ga] += c
+                    dpts[dd, gb] -= c
+                end
+            end
+        end
+    end
+    return dpts
+end
+
+"""
+    generate_inv_loss_grad_points(prob, data) -> (D, N) matrix
+
+Gradient of the full inverse loss `0.5·‖generate_inv(prob, data)‖²` (dense first layer +
+refinement) w.r.t. the continuous point positions. `data` is in the original ordering;
+reordering is handled internally. See [`refine_logdet_grad_points`](@ref) for the
+straight-through-lattice convention.
+"""
+function generate_inv_loss_grad_points(prob::GraphGPProblem{T}, data::AbstractVector) where {T}
+    n0 = prob.n0
+    data_ord = prob.indices !== nothing ? Array(data)[prob.indices] : Array(data)
+    gp_ref = refine_inv_loss_grad_points(prob, data_ord)
+    gp_dense = _dense_inv_loss_grad_points(prob, data_ord[1:n0])
+    return gp_ref .+ gp_dense
+end
+
+"""
     generate_grad_xi(prob, vbar; backend) -> x̄
 
 Vector-Jacobian product of `generate(prob, xi)` with respect to `xi`, for an output cotangent

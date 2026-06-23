@@ -197,20 +197,31 @@ function _dense_logdet_grad_points(prob::GraphGPProblem{T}) where {T}
     return dpts
 end
 
-# Gradient of 0.5*||generate_dense_inv||^2 w.r.t. vals.
-# With xi = L^{-1} y, d(0.5||xi||^2)/d(K[a,b]) = -0.5*xi[a]*xi[b] (diagonal)
-# or -xi[a]*xi[b] (off-diagonal), from the matrix-calculus identity for y^T K^{-1} y.
+# α = K⁻¹·y for the dense inverse loss 0.5‖xi‖² = 0.5·yᵀK⁻¹y (xi = L⁻¹y from generate_dense_inv,
+# so α = L⁻ᵀ·xi). Shared by the cov_vals and points gradients below.
+function _dense_inv_alpha(prob::GraphGPProblem{T}, data_dense) where {T}
+    n0 = prob.n0
+    coords_n0 = Array(view(prob.coords, :, 1:n0))
+    bins = Array(prob.bins)
+    vals = Array(prob.vals)
+    K = _assemble_dense_cov(coords_n0, prob.scale, bins, vals, n0)
+    L = LinearAlgebra.cholesky!(LinearAlgebra.Symmetric(K, :L)).L
+    Lt = LinearAlgebra.LowerTriangular(L)
+    xi = Lt \ Array(data_dense)          # L⁻¹ y
+    alpha = transpose(Lt) \ xi           # L⁻ᵀ xi = K⁻¹ y
+    return coords_n0, bins, vals, alpha
+end
+
+# Gradient of 0.5*‖generate_dense_inv‖² = 0.5·yᵀK⁻¹y w.r.t. vals.
+# d/d(cov(r_ab)) = -α[a]·α[b] off-diagonal, -0.5·α[a]² on the diagonal, with α = K⁻¹y.
 function _dense_inv_loss_grad_vals(prob::GraphGPProblem{T},
         data_dense::AbstractVector{T}) where {T}
     n0 = prob.n0
     D = ndims_space(prob)
     nb = nbins(prob)
-    coords_n0 = Array(view(prob.coords, :, 1:n0))   # host (small dense block)
-    bins = Array(prob.bins)
-    xi_d = generate_dense_inv(coords_n0, prob.scale, bins, prob.vals, data_dense)
+    coords_n0, bins, _, alpha = _dense_inv_alpha(prob, data_dense)
     dv = zeros(T, nb)
     for b in 1:n0
-        xib = xi_d[b]
         for a in b:n0
             sq = zero(Int64)
             for d in 1:D
@@ -219,10 +230,44 @@ function _dense_inv_loss_grad_vals(prob::GraphGPProblem{T},
             end
             r = sqrt(T(sq)) * prob.scale
             lo, wlo, whi = cov_lookup_weights(r, bins, nb)
-            g = a == b ? -T(0.5) * xib * xi_d[a] : -xib * xi_d[a]
+            g = a == b ? -T(0.5) * alpha[a] * alpha[a] : -alpha[a] * alpha[b]
             dv[lo] += g * wlo
             dv[lo + 1] += g * whi
         end
     end
     return dv
+end
+
+# Gradient of 0.5*‖generate_dense_inv‖² w.r.t. the positions of the first n0 points.
+# Off-diagonal cotangent -α[a]·α[b] propagated through k'(r)·dr/dx; diagonal (r=0) is
+# position-independent and skipped.
+function _dense_inv_loss_grad_points(prob::GraphGPProblem{T},
+        data_dense::AbstractVector{T}) where {T}
+    n0 = prob.n0
+    D = ndims_space(prob)
+    nb = nbins(prob)
+    N = npoints(prob)
+    coords_n0, bins, vals, alpha = _dense_inv_alpha(prob, data_dense)
+    dpts = zeros(T, D, N)
+    @inbounds for b in 1:n0
+        for a in (b + 1):n0
+            sq = zero(Int64)
+            for d in 1:D
+                di = Int64(coords_n0[d, a]) - Int64(coords_n0[d, b])
+                sq += di * di
+            end
+            sq == 0 && continue
+            r = sqrt(T(sq)) * prob.scale
+            dcov = cov_lookup_dr(r, bins, vals, nb)
+            dcov == 0 && continue
+            factor = (-alpha[a] * alpha[b]) * dcov / r
+            for d in 1:D
+                diff = prob.scale * (T(Int64(coords_n0[d, a])) - T(Int64(coords_n0[d, b])))
+                c = factor * diff
+                dpts[d, a] += c
+                dpts[d, b] -= c
+            end
+        end
+    end
+    return dpts
 end
