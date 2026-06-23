@@ -37,6 +37,109 @@ using Atomix: Atomix
     return nothing
 end
 
+# Shared scatter helper for the POINT gradients: accumulate Abar cotangents into d_points
+# (D × N) through k'(r)·dr/dx with atomic adds. Diagonal entries (r=0) are position-independent
+# and skipped. `ga`/`gb` are the global point indices for local rows a/b of the (k+1) block.
+@inline function _scatter_Abar_points_atomic!(d_points, Abar, jc, neighbors, m, n0,
+        scale::T, bins, vals, nbins, ::Val{KP1}, ::Val{D}) where {T, KP1, D}
+    K = KP1 - 1
+    @inbounds for a in 2:KP1
+        ga = a <= K ? neighbors[a, m] : n0 + m
+        for b in 1:(a - 1)
+            gb = b <= K ? neighbors[b, m] : n0 + m
+            sq = zero(Int64)
+            for dd in 1:D
+                di = Int64(jc[a, dd]) - Int64(jc[b, dd])
+                sq += di * di
+            end
+            sq == 0 && continue
+            r = sqrt(T(sq)) * scale
+            dcov = cov_lookup_dr(r, bins, vals, nbins)
+            dcov == zero(T) && continue
+            factor = Abar[a, b] * dcov / r
+            for dd in 1:D
+                diff = scale * (T(Int64(jc[a, dd])) - T(Int64(jc[b, dd])))
+                c = factor * diff
+                Atomix.@atomic d_points[dd, ga] += c
+                Atomix.@atomic d_points[dd, gb] -= c
+            end
+        end
+    end
+    return nothing
+end
+
+# Gradient of refine_logdet w.r.t. point positions (atomic scatter into d_points).
+@kernel function refine_logdet_grad_points_kernel!(d_points, @Const(coords), @Const(neighbors),
+        n0, scale::T, @Const(bins), @Const(vals), nbins, seed::T,
+        ::Val{K}, ::Val{D}) where {T, K, D}
+    m = @index(Global)
+    A    = @private T (K + 1, K + 1)
+    Abar = @private T (K + 1, K + 1)
+    Lbar = @private T (K + 1, K + 1)
+    jc   = @private UInt32 (K + 1, D)
+
+    _gather_joint!(jc, coords, neighbors, m, n0, Val(K), Val(D))
+    assemble_cov!(A, jc, Val(K + 1), Val(D), scale, bins, vals, nbins)
+    chol_lower!(A, Val(K + 1))
+    chol_logdet_pullback!(Abar, Lbar, A, Val(K + 1), seed)
+    _scatter_Abar_points_atomic!(d_points, Abar, jc, neighbors, m, n0, scale, bins, vals,
+        nbins, Val(K + 1), Val(D))
+end
+
+# Gradient of 0.5·‖xi‖² (xi = refine_inv) w.r.t. point positions (atomic scatter into d_points).
+@kernel function refine_inv_loss_grad_points_kernel!(d_points, @Const(coords), @Const(neighbors),
+        @Const(values), n0, scale::T, @Const(bins), @Const(vals), nbins,
+        ::Val{K}, ::Val{D}) where {T, K, D}
+    m = @index(Global)
+    A    = @private T (K + 1, K + 1)
+    Abar = @private T (K + 1, K + 1)
+    Lbar = @private T (K + 1, K + 1)
+    mv   = @private T (K,)
+    zbar = @private T (K,)
+    jc   = @private UInt32 (K + 1, D)
+
+    _gather_joint!(jc, coords, neighbors, m, n0, Val(K), Val(D))
+    assemble_cov!(A, jc, Val(K + 1), Val(D), scale, bins, vals, nbins)
+    chol_lower!(A, Val(K + 1))
+    mean_vec_solve!(mv, A, Val(K))
+    std = A[K + 1, K + 1]
+
+    @inbounds begin
+        mean_val = zero(T)
+        for j in 1:K
+            mean_val += mv[j] * values[neighbors[j, m]]
+        end
+        xi_m = (values[n0 + m] - mean_val) / std
+    end
+
+    @inbounds for j in 1:(K + 1)
+        for i in 1:(K + 1)
+            Lbar[i, j] = zero(T)
+        end
+    end
+    @inbounds Lbar[K + 1, K + 1] = -xi_m * xi_m / std
+    @inbounds for j in 1:K
+        zbar[j] = -xi_m * values[neighbors[j, m]] / std
+    end
+    @inbounds for i in 1:K
+        s = zbar[i]
+        for p in 1:(i - 1)
+            s -= A[i, p] * zbar[p]
+        end
+        zbar[i] = s / A[i, i]
+    end
+    @inbounds for j in 1:K
+        Lbar[K + 1, j] += zbar[j]
+        for i in 1:j
+            Lbar[j, i] -= zbar[i] * mv[j]
+        end
+    end
+
+    chol_pullback!(Abar, Lbar, A, Val(K + 1))
+    _scatter_Abar_points_atomic!(d_points, Abar, jc, neighbors, m, n0, scale, bins, vals,
+        nbins, Val(K + 1), Val(D))
+end
+
 # Gradient of refine_logdet w.r.t. cov_vals.
 @kernel function refine_logdet_grad_kernel!(d_vals, @Const(coords), @Const(neighbors),
         n0, scale::T, @Const(bins), @Const(vals), nbins, seed::T,

@@ -130,6 +130,20 @@ let cuda_ok = false
                 @test isfinite(generate_logdet(prob))
             end
 
+            @testset "GPU point gradients (atomic scatter) match CPU host" begin
+                rng = MersenneTwister(7)
+                N, D, n0, k = 4000, 3, 80, 10
+                pts = randn(rng, N, D)
+                bins, vals = rbf_kernel(1.0, 0.4, 1e-4, 1e1, 300; jitter = 1e-3)
+                prob = build_graph(pts, n0, k, bins, vals)
+                pg = to_backend(prob, CUDABackend())
+                data = randn(rng, N)
+                @test isapprox(Array(generate_logdet_grad_points(pg)),
+                    generate_logdet_grad_points(prob); rtol = 1e-6, atol = 1e-8)
+                @test isapprox(Array(generate_inv_loss_grad_points(pg, CuArray(data))),
+                    generate_inv_loss_grad_points(prob, data); rtol = 1e-6, atol = 1e-8)
+            end
+
             @testset "GPU end-to-end: build on CPU, run on GPU (to_backend)" begin
                 rng = MersenneTwister(77)
                 N, D, n0, k = 1500, 3, 40, 8

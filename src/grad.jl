@@ -157,7 +157,25 @@ Same per-point backward as the `cov_vals` adjoint (`assemble → Cholesky → ch
 but each off-diagonal cotangent `Abar[a,b]` is propagated through `k'(r)·dr/dx` to the two
 points involved instead of into `cov_vals`. CPU implementation (host accumulation).
 """
-function refine_logdet_grad_points(prob::GraphGPProblem{T}) where {T}
+function refine_logdet_grad_points(prob::GraphGPProblem{T};
+        backend = KernelAbstractions.get_backend(prob)) where {T}
+    if backend isa KernelAbstractions.CPU
+        return _refine_logdet_grad_points_cpu(prob)
+    end
+    # GPU: atomic scatter into a device d_points.
+    M = nrefined(prob)
+    K = nneighbors(prob)
+    D = ndims_space(prob)
+    N = npoints(prob)
+    dpts = KernelAbstractions.zeros(backend, T, D, N)
+    refine_logdet_grad_points_kernel!(backend)(dpts, prob.coords, prob.neighbors, prob.n0,
+        prob.scale, prob.bins, prob.vals, nbins(prob), one(T), Val(K), Val(D);
+        ndrange = M, workgroupsize = _wgsize(backend))
+    KernelAbstractions.synchronize(backend)
+    return dpts
+end
+
+function _refine_logdet_grad_points_cpu(prob::GraphGPProblem{T}) where {T}
     M = nrefined(prob)
     K = nneighbors(prob)
     D = ndims_space(prob)
@@ -213,8 +231,11 @@ Gradient of the full `generate_logdet(prob)` (dense first layer + Vecchia refine
 respect to the continuous point positions `x = scale · coords` (tree/depth order). See
 [`refine_logdet_grad_points`](@ref) for the straight-through-lattice convention.
 """
-function generate_logdet_grad_points(prob::GraphGPProblem{T}) where {T}
-    return refine_logdet_grad_points(prob) .+ _dense_logdet_grad_points(prob)
+function generate_logdet_grad_points(prob::GraphGPProblem{T};
+        backend = KernelAbstractions.get_backend(prob)) where {T}
+    gp_ref = refine_logdet_grad_points(prob; backend = backend)   # device or host
+    gp_dense = _dense_logdet_grad_points(prob)                     # host (small dense block)
+    return gp_ref .+ _move_to_backend(gp_dense, backend)
 end
 
 """
@@ -227,7 +248,25 @@ from `d(0.5·xiₘ²)/d(std, mean_vec)`, run `chol_pullback!` to get `Abar`, the
 off-diagonal `Abar[a,b]` through `k'(r)·dr/dx` into the two points (instead of into `cov_vals`).
 CPU/host accumulation. `values` is in tree/depth order.
 """
-function refine_inv_loss_grad_points(prob::GraphGPProblem{T}, values::AbstractVector) where {T}
+function refine_inv_loss_grad_points(prob::GraphGPProblem{T}, values::AbstractVector;
+        backend = KernelAbstractions.get_backend(prob)) where {T}
+    if backend isa KernelAbstractions.CPU
+        return _refine_inv_loss_grad_points_cpu(prob, values)
+    end
+    # GPU: atomic scatter into a device d_points (values must be on the device).
+    M = nrefined(prob)
+    K = nneighbors(prob)
+    D = ndims_space(prob)
+    N = npoints(prob)
+    dpts = KernelAbstractions.zeros(backend, T, D, N)
+    refine_inv_loss_grad_points_kernel!(backend)(dpts, prob.coords, prob.neighbors, values,
+        prob.n0, prob.scale, prob.bins, prob.vals, nbins(prob), Val(K), Val(D);
+        ndrange = M, workgroupsize = _wgsize(backend))
+    KernelAbstractions.synchronize(backend)
+    return dpts
+end
+
+function _refine_inv_loss_grad_points_cpu(prob::GraphGPProblem{T}, values::AbstractVector) where {T}
     M = nrefined(prob)
     K = nneighbors(prob)
     D = ndims_space(prob)
@@ -318,12 +357,15 @@ refinement) w.r.t. the continuous point positions. `data` is in the original ord
 reordering is handled internally. See [`refine_logdet_grad_points`](@ref) for the
 straight-through-lattice convention.
 """
-function generate_inv_loss_grad_points(prob::GraphGPProblem{T}, data::AbstractVector) where {T}
+function generate_inv_loss_grad_points(prob::GraphGPProblem{T}, data::AbstractVector;
+        backend = KernelAbstractions.get_backend(prob)) where {T}
     n0 = prob.n0
-    data_ord = prob.indices !== nothing ? Array(data)[prob.indices] : Array(data)
-    gp_ref = refine_inv_loss_grad_points(prob, data_ord)
-    gp_dense = _dense_inv_loss_grad_points(prob, data_ord[1:n0])
-    return gp_ref .+ gp_dense
+    data_b = _move_to_backend(data, backend)              # data on the problem's backend
+    data_ord = prob.indices !== nothing ?
+        data_b[_move_to_backend(prob.indices, backend)] : data_b
+    gp_ref = refine_inv_loss_grad_points(prob, data_ord; backend = backend)
+    gp_dense = _dense_inv_loss_grad_points(prob, data_ord[1:n0])   # host (small dense block)
+    return gp_ref .+ _move_to_backend(gp_dense, backend)
 end
 
 """
