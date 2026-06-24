@@ -6,14 +6,11 @@
 #
 # <ops> is a comma list of: generate,generate_inv,logdet,grad  (grad = generate_logdet_grad_vals)
 #
-# INDEX CONVENTION (load-bearing): the bridge contract is ORIGINAL order on BOTH sides for every op.
-#   generate:     Python gathers xi ORIGINAL->tree then scatters output tree->ORIGINAL. Julia
-#                 `generate(prob,xi)` takes TREE-order xi (no input gather) and scatters output
-#                 ->ORIGINAL. So we GATHER xi by `indices` here before calling Julia generate.
-#   generate_inv: Python takes ORIGINAL values and returns ORIGINAL xi. Julia `generate_inv(prob,v)`
-#                 gathers v ORIGINAL->tree internally but returns xi in TREE order (no output
-#                 scatter). So we SCATTER the result tree->ORIGINAL here.
-# `in.npz` always provides xi/values in ORIGINAL order; `out.npz` is always ORIGINAL order.
+# INDEX CONVENTION: as of the generate-ordering-dropin fix, GraphGP.jl `generate`/`generate_inv`
+# are ORIGINAL-order in AND out (they gather xi->tree on input and scatter the result->ORIGINAL
+# internally via `prob.indices`), exactly matching Python `graphgp`. So this driver does NO manual
+# reordering — it passes the original-order xi/values straight through. `in.npz` always provides
+# xi/values in ORIGINAL order; `out.npz` is always ORIGINAL order.
 
 using GraphGP, KernelAbstractions, NPZ, Printf
 
@@ -36,11 +33,6 @@ prob = GraphGPProblem(coords, neighbors, offsets, n0, scale, bins, vals, indices
 if usegpu
     prob = to_backend(prob, CUDABackend())
 end
-gather(x) = indices === nothing ? x : x[indices]      # ORIGINAL -> tree order (matches Python input)
-function scatter(x)                                    # tree -> ORIGINAL order (matches Python output)
-    indices === nothing && return x
-    out = similar(x); out[indices] = x; return out
-end
 
 results = Dict{String,Any}()
 
@@ -50,7 +42,7 @@ if "generate" in ops
     N, S = size(xi)
     outv = Array{Float64}(undef, S, N)                # (n_samples, N) ORIGINAL order
     for s in 1:S
-        xis = gather(xi[:, s])
+        xis = xi[:, s]                                # original order; generate gathers internally
         usegpu && (xis = CuArray(xis))
         outv[s, :] = Float64.(Array(generate(prob, xis)))
     end
@@ -58,10 +50,9 @@ if "generate" in ops
 end
 
 if "generate_inv" in ops
-    values = T.(vec(d["values"]))                     # ORIGINAL order (Julia gathers->tree internally)
+    values = T.(vec(d["values"]))                     # ORIGINAL order
     usegpu && (values = CuArray(values))
-    xi_tree = Array(generate_inv(prob, values))       # TREE order
-    results["generate_inv"] = Float64.(scatter(xi_tree))    # -> ORIGINAL order (matches Python)
+    results["generate_inv"] = Float64.(Array(generate_inv(prob, values)))   # ORIGINAL order out
 end
 
 if "logdet" in ops
