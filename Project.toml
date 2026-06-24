@@ -12,12 +12,19 @@ KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
 
+[weakdeps]
+MPI = "da04e1cc-30fd-572f-bb4f-1f8673147195"
+
+[extensions]
+GraphGPMPIExt = "MPI"
+
 [compat]
 Atomix = "0.1, 1"
 ChainRulesCore = "1"
 Enzyme = "0.13.163"
 ForwardDiff = "0.10"
 KernelAbstractions = "0.9"
+MPI = "0.20"
 SpecialFunctions = "1, 2"
 julia = "1.10"
 
