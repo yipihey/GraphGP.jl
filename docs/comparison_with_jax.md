@@ -111,12 +111,46 @@ exactly what the `graphgp` CUDA extension *is*, and that extension is GPU-only a
 autodiff. GraphGP.jl provides the fused-kernel approach as a single portable implementation that
 runs on CPU **and** GPU **and** differentiates.
 
+## What's new in the Julia port (map)
+
+The port lives entirely under [`julia/GraphGP/`](../). It is a standalone Julia package — no
+Python or C++ dependency — built on KernelAbstractions so one kernel set runs on CPU and CUDA.
+
+- **One fused kernel, two backends.** [`src/kernels.jl`](../src/kernels.jl) (one workitem per
+  refined point; assembles the `(k+1)²` covariance, factorises it in registers, never
+  materialises the batch) + [`src/linalg.jl`](../src/linalg.jl) (the per-point Cholesky / solve
+  primitives). The CPU backend dispatches to a native threaded path,
+  [`src/cpu_native.jl`](../src/cpu_native.jl) (the KA CPU backend is 5–13× slower; see below).
+- **Analytic gradients the CUDA extension lacks.** [`src/kernels_adjoint.jl`](../src/kernels_adjoint.jl),
+  [`src/grad.jl`](../src/grad.jl) — reverse-mode Cholesky pullback for ∂/∂cov_vals, plus
+  ∂/∂hyperparameters, ∂/∂xi, and ∂/∂points (positions treated as continuous), CPU **and** GPU.
+  [`src/chainrules.jl`](../src/chainrules.jl) exposes them as ChainRules `rrule`s so Zygote
+  composes arbitrary scalar losses.
+- **Full graph construction in Julia, on GPU.** [`src/graph_build.jl`](../src/graph_build.jl),
+  [`src/tree_gpu.jl`](../src/tree_gpu.jl) — `build_graph_ka` runs tree build → k-NN query →
+  depths → reorder → quantise entirely on the device (`build_graph_ka(CuArray(points), …) →
+  generate/refine/gradients`, no host round-trip).
+- **Benchmarks & validation.** [`test/GPU_BENCHMARK_RESULTS.md`](../test/GPU_BENCHMARK_RESULTS.md)
+  (0.2 M–20 M sweep, GPU vs the CUDA extension vs pure JAX; CPU NUMA scaling),
+  [`bench/compare/`](../bench/compare/README.md) (this note's harness),
+  [`FEATURE_COVERAGE.md`](../FEATURE_COVERAGE.md) (parity audit vs the Python API).
+- **Try it.** [`examples/parity_and_autodiff.jl`](../examples/parity_and_autodiff.jl) — build a
+  graph, evaluate forward, and take all four gradients in ~40 lines; CPU out of the box, GPU by
+  uncommenting one `to_backend` block.
+
 ## Reproduce
 
 ```bash
+# the comparison in this note (correctness cross-check + throughput)
 cd julia/GraphGP/bench/compare
 ./run_all.sh 2000000 10 3 64      # N K D NTHREADS
-cat results/report.md
+cat results/report.md             # also committed as sample_report_2M.md
+
+# the package test suite (CPU + auto GPU testset if CUDA is present)
+julia --project=julia/GraphGP -e 'using Pkg; Pkg.test()'
+
+# the example
+julia --project=julia/GraphGP julia/GraphGP/examples/parity_and_autodiff.jl
 ```
 
 See [`bench/compare/README.md`](../bench/compare/README.md) for knobs and the per-path scripts.
