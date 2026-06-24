@@ -39,6 +39,8 @@ struct DistributedGraphGPProblem{P <: GraphGPProblem, DP, C}
     m_lo::Int              # this rank's first global refined column (1-based)
     m_hi::Int              # this rank's last  global refined column
     is_root::Bool          # rank 0: owns the dense first-layer contribution
+    indices::Union{Nothing, Vector{Int}}  # GLOBAL tree-order permutation (for reordering data)
+    offsets::Vector{Int}   # GLOBAL depth-batch offsets (for distributed forward generation)
 end
 
 nrefined_local(d::DistributedGraphGPProblem) = d.m_hi - d.m_lo + 1
@@ -57,8 +59,11 @@ function distribute end
 # `_dist_allreduce_sum(x::Float64, comm) -> Float64`  : sum-allreduce of a scalar.
 # `_dist_allreduce_sum!(v::Vector{Float64}, comm)`     : in-place sum-allreduce of a vector
 #   (CUDA-aware when available; host-staged otherwise — the payload is a scalar + nbins vector).
+# `_dist_allgather_columns(local_xi, comm) -> Vector` : concatenate each rank's slice in rank
+#   order into the full vector (for distributed refine_inv).
 function _dist_allreduce_sum end
 function _dist_allreduce_sum! end
+function _dist_allgather_columns end
 
 # --- distributed log-likelihood + gradient (these reuse the existing local drivers) ---
 
@@ -125,4 +130,149 @@ function _local_grad_vals_f64(dprob::DistributedGraphGPProblem; backend)
         dv .+= Float64.(_dense_logdet_grad_vals(dprob.dense_prob))
     end
     return dv
+end
+
+# === Phase 2: distributed inverse (refine_inv) + inverse-quadratic loss gradient ===
+#
+# `refine_inv` and the inverse-quadratic loss are per-point independent, but each point reads
+# `data[neighbors]` — an N-vector. Under scheme A, `data` is small (8 B/pt) and replicated: pass
+# the FULL data vector (original order); we reorder to tree order once on every rank, then the
+# existing local kernels run on this rank's slice. The loss + its `vals` gradient reduce exactly
+# like the logdet (sum of independent terms); the recovered `xi` is assembled by an allgather of
+# the per-rank column slices.
+
+# Reorder a full (original-order) data vector to tree/depth order on every rank.
+_data_to_tree_order(dprob::DistributedGraphGPProblem, data) =
+    dprob.indices === nothing ? data : data[dprob.indices]
+
+"""
+    refine_inv(dprob::DistributedGraphGPProblem, data; backend) -> Vector
+
+Distributed `refine_inv`: each rank recovers `xi` for its refined-point slice from the
+(replicated, original-order) `data`, then an allgather assembles the full length-`M` `xi`
+(global refined order).
+"""
+function refine_inv(dprob::DistributedGraphGPProblem, data::AbstractVector;
+        backend = KernelAbstractions.get_backend(dprob))
+    lp = dprob.local_prob
+    data_ord = _data_to_tree_order(dprob, data)
+    data_local = _move_to_backend(eltype(lp.vals).(data_ord), backend)
+    xi_local = Array(refine_inv(lp, data_local; backend = backend))    # this rank's columns
+    # Columns are assigned contiguously in rank order, so an Allgatherv in rank order
+    # reconstructs the full xi in global refined-column order.
+    return _dist_allgather_columns(xi_local, dprob.comm)
+end
+
+"""
+    generate_inv_loss_grad_vals(dprob::DistributedGraphGPProblem, data; backend) -> (Float64, Vector{Float64})
+
+Distributed gradient of `0.5‖generate_inv(data)‖²` w.r.t. `vals`: each rank computes the loss +
+`vals`-gradient over its slice, the root adds the dense first layer, then a single sum-`Allreduce`
+of `[loss; d_vals]`. Returns the global `(loss, d_vals)` on every rank.
+"""
+function generate_inv_loss_grad_vals(dprob::DistributedGraphGPProblem, data::AbstractVector;
+        backend = KernelAbstractions.get_backend(dprob))
+    lp = dprob.local_prob
+    T = eltype(lp.vals)
+    data_ord = _data_to_tree_order(dprob, data)
+    data_local = _move_to_backend(T.(data_ord), backend)
+    ref_loss, g_ref = refine_inv_loss_grad_vals(lp, data_local; backend = backend)
+    local_loss = Float64(ref_loss)
+    dv = Float64.(Array(g_ref))
+    if dprob.is_root
+        n0 = dprob.n0
+        dd = T.(data_ord[1:n0])
+        xi_dense = generate_dense_inv(view(lp.coords, :, 1:n0), lp.scale, lp.bins, lp.vals, dd)
+        local_loss += sum(abs2, xi_dense) / 2
+        dv .+= Float64.(_dense_inv_loss_grad_vals(dprob.dense_prob, dd))
+    end
+    packed = Vector{Float64}(undef, length(dv) + 1)
+    packed[1] = local_loss
+    @inbounds packed[2:end] .= dv
+    _dist_allreduce_sum!(packed, dprob.comm)
+    return packed[1], packed[2:end]
+end
+
+# === Phase 3b: distributed forward generation of a SINGLE field ===
+#
+# `generate` is a sequential sweep over depth batches: batch b reads `values[neighbors]` produced
+# by earlier batches. Distributed form (scheme A, replicated values): the parallel mean/std pass
+# runs on each rank's column slice; then for each GLOBAL depth batch every rank applies its
+# columns within that batch and a sum-Allreduce of the batch's self-values syncs all ranks before
+# the next batch. Correctness-complete; the per-batch apply here is host-side (the field is
+# replicated, so this distributes COMPUTE, not memory — partitioned values for memory scaling is
+# Phase 4 / scheme B). For many independent fields prefer replicate-the-graph realizations.
+
+# This rank's conditional-mean weights + std for its column slice (reuses the existing kernels).
+function _local_meanvec_std(lp::GraphGPProblem{T}; backend) where {T}
+    K = nneighbors(lp); D = ndims_space(lp); M = nrefined(lp)
+    mean_vec = KernelAbstractions.zeros(backend, T, K, M)
+    std = KernelAbstractions.zeros(backend, T, M)
+    if _is_cpu(backend)
+        _native_refine_meanvec_std!(mean_vec, std, lp, Val(K), Val(D))
+    else
+        refine_meanvec_std_kernel!(backend)(mean_vec, std, lp.coords, lp.neighbors, lp.n0,
+            lp.scale, lp.bins, lp.vals, nbins(lp), Val(K), Val(D);
+            ndrange = M, workgroupsize = _wgsize(backend))
+        KernelAbstractions.synchronize(backend)
+    end
+    return mean_vec, std
+end
+
+"""
+    generate(dprob::DistributedGraphGPProblem, xi; backend) -> Vector
+
+Distributed forward generation of one field from full (replicated, tree-order) unit-normal
+parameters `xi` (length N). Returns the field in the original point order on every rank.
+"""
+function generate(dprob::DistributedGraphGPProblem, xi::AbstractVector;
+        backend = KernelAbstractions.get_backend(dprob))
+    lp = dprob.local_prob
+    T = eltype(lp.vals)
+    n0g = dprob.n0
+    offs = dprob.offsets
+    N = npoints(lp)
+
+    # Dense first layer (deterministic, replicated) + this rank's mean/std slice.
+    xi_b = _move_to_backend(T.(xi), backend)
+    v_dense = Array(generate_dense(view(lp.coords, :, 1:n0g), lp.scale, lp.bins, lp.vals,
+        xi_b[1:n0g]))
+    mv_d, std_d = _local_meanvec_std(lp; backend)
+    mean_vec = Array(mv_d)                                 # K × M_local
+    std = Array(std_d)                                     # M_local
+    nbrs = Array(lp.neighbors)                             # K × M_local, global indices
+    xi_h = T.(xi)                                          # host, tree order
+    K = size(nbrs, 1)
+
+    values = zeros(T, N)                                   # replicated host field (tree order)
+    @inbounds values[1:n0g] .= v_dense
+
+    # Sequential global depth-batch sweep with a per-batch sum-Allreduce of new self-values.
+    for b in 2:length(offs)
+        gc_lo = offs[b - 1] - n0g + 1     # first global refined column (1-based) in this batch
+        gc_hi = offs[b] - n0g
+        gc_hi < gc_lo && continue
+        blen = gc_hi - gc_lo + 1
+        contrib = zeros(Float64, blen)    # this rank's contributions (0 where another rank owns)
+        lo = max(gc_lo, dprob.m_lo)
+        hi = min(gc_hi, dprob.m_hi)
+        @inbounds for c in lo:hi           # global columns this rank owns within the batch
+            lc = c - dprob.m_lo + 1        # local column index
+            acc = zero(T)
+            for j in 1:K
+                acc += mean_vec[j, lc] * values[nbrs[j, lc]]
+            end
+            contrib[c - gc_lo + 1] = Float64(acc + std[lc] * xi_h[n0g + c])
+        end
+        _dist_allreduce_sum!(contrib, dprob.comm)
+        @inbounds values[(n0g + gc_lo):(n0g + gc_hi)] .= T.(contrib)
+    end
+
+    # Reorder to original point order if the graph was permuted.
+    if dprob.indices !== nothing
+        out = similar(values)
+        @inbounds out[dprob.indices] = values
+        return out
+    end
+    return values
 end

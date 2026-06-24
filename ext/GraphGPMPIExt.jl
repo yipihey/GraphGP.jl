@@ -12,7 +12,7 @@ module GraphGPMPIExt
 
 using GraphGP
 using MPI
-import GraphGP: distribute, _dist_allreduce_sum, _dist_allreduce_sum!,
+import GraphGP: distribute, _dist_allreduce_sum, _dist_allreduce_sum!, _dist_allgather_columns,
     DistributedGraphGPProblem, GraphGPProblem, nrefined
 
 # Balanced contiguous split of 1:M across `nranks`: the first `rem` ranks get one extra column.
@@ -57,7 +57,8 @@ function distribute(prob::GraphGPProblem, comm::MPI.Comm; scheme::Symbol = :repl
 
     is_root = rank == 0
     dense_prob = is_root ? _dense_only_prob(prob) : nothing
-    return DistributedGraphGPProblem(local_prob, dense_prob, comm, n0g, m_lo, m_hi, is_root)
+    return DistributedGraphGPProblem(local_prob, dense_prob, comm, n0g, m_lo, m_hi, is_root,
+        prob.indices, copy(prob.offsets))
 end
 
 # --- reduction shims (host Float64 payloads) ---
@@ -66,6 +67,14 @@ _dist_allreduce_sum(x::Float64, comm::MPI.Comm) = MPI.Allreduce(x, MPI.SUM, comm
 function _dist_allreduce_sum!(v::Vector{Float64}, comm::MPI.Comm)
     MPI.Allreduce!(v, MPI.SUM, comm)
     return v
+end
+
+# Concatenate each rank's contiguous slice (in rank order) into the full vector.
+function _dist_allgather_columns(xi_local::AbstractVector, comm::MPI.Comm)
+    counts = MPI.Allgather(Cint(length(xi_local)), comm)
+    out = Vector{eltype(xi_local)}(undef, sum(counts))
+    MPI.Allgatherv!(collect(xi_local), MPI.VBuffer(out, counts), comm)
+    return out
 end
 
 end # module
