@@ -16,6 +16,7 @@ include("dense.jl")
 include("aniso.jl")
 include("orchestrate.jl")
 include("tree.jl")
+include("tree_special.jl")
 include("tree_gpu.jl")
 include("graph_build.jl")
 include("chainrules.jl")
@@ -38,6 +39,7 @@ export generate, generate_inv, generate_logdet
 # Phase 9: graph build pipeline
 export build_graph, compute_depths, order_by_depth, build_tree
 export query_preceding_neighbors, quantize_to_lattice, check_graph
+export build_tree_special, query_preceding_neighbors_special
 export query_preceding_neighbors_ka, build_tree_ka, order_by_depth_ka, build_graph_ka
 # Phase 10: differentiability (ChainRules entry points)
 export logdet_of_vals, inv_quadratic_loss_of_vals, generate_grad_xi

@@ -85,6 +85,43 @@ end
     end
 end
 
+@testset "build_tree_special + query: exact preceding k-NN, heap order, shallow" begin
+    # The "special order" heap build (port of tree.py:_build_tree) must (1) return a valid
+    # permutation, (2) have its preceding-neighbour query reproduce brute-force k-NN exactly
+    # (incl. distance-sorted order, ties broken by index), and (3) be far shallower than the
+    # leaf-order tree (the whole point of the heap layout).
+    function brute_preceding_rows(pts, n0, k)          # pts is (N, D)
+        N, D = size(pts)
+        nb = zeros(Int, k, N - n0)
+        for m in (n0 + 1):N
+            ds = [(sum(abs2, @view(pts[j, :]) .- @view(pts[m, :])), j) for j in 1:(m - 1)]
+            sort!(ds)                                  # by (distance, index)
+            for i in 1:k
+                nb[i, m - n0] = ds[i][2]
+            end
+        end
+        nb
+    end
+    rng = Random.MersenneTwister(31)
+    for (N, D, n0, k) in ((800, 3, 64, 8), (1500, 2, 40, 10))
+        pts = randn(rng, N, D)
+        tp, sd, perm = build_tree_special(pts)
+        @test sort(perm) == collect(1:N)               # perm is a permutation
+        @test tp ≈ pts[perm, :]                        # tree order = points[perm]
+        @test all(1 .<= sd .<= D)                      # split dims valid
+        nbq = query_preceding_neighbors_special(tp, sd, n0, k)
+        nbb = brute_preceding_rows(tp, n0, k)
+        @test nbq == nbb                               # exact match incl. order (no ties for randn)
+    end
+
+    # Shallowness: heap order yields O(log N)-ish depth batches, not O(N).
+    pts = randn(rng, 5000, 3)
+    bins, vals = rbf_kernel(1.0, 0.4, 1e-4, 1e1, 100; jitter = 1e-3)
+    prob = build_graph(pts, 128, 8, bins, vals)
+    @test check_graph(prob) === nothing
+    @test length(prob.offsets) < 80                    # leaf-order would be many hundreds
+end
+
 @testset "build_graph smoke: valid GP structure" begin
     # Build a graph from scratch, run refine_logdet, check it's finite.
     rng = Random.MersenneTwister(99)

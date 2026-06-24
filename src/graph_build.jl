@@ -260,13 +260,14 @@ function build_graph(points::Matrix{Float64}, n0::Int, k::Int,
     @assert n0 < N "n0 must be less than N"
     @assert k > 0 "k must be positive"
 
-    # Step 1: build k-d tree (tree order).
-    sorted_pts, seg_lo, seg_hi, split_dim, tree_perm = build_tree(points)
+    # Step 1: build the JAX "special order" heap-layout k-d tree. This reproduces
+    # `tree.py:_build_tree` operation-for-operation, so the resulting graph is IDENTICAL to
+    # Python's pure-JAX `gp.build_graph` (neighbours, offsets, permutation) and — crucially —
+    # yields a SHALLOW Vecchia DAG (the first n0 points are the spread tree medians).
+    sorted_pts, split_dim, tree_perm = build_tree_special(points)
 
-    # Step 2: query preceding neighbors in tree order (scalar CPU reference). For GPU builds use
-    # `query_preceding_neighbors_ka` on device arrays (see bench/bench_build.jl); the KA query is
-    # GPU-friendly but, on the KA CPU backend, slower than this scalar path.
-    neighbors = query_preceding_neighbors(sorted_pts, seg_lo, seg_hi, split_dim, n0, k)
+    # Step 2: query preceding neighbors via the exact stackless heap traversal.
+    neighbors = query_preceding_neighbors_special(sorted_pts, split_dim, n0, k)
 
     # Step 3: depth ordering.
     depths = compute_depths(neighbors, n0)
