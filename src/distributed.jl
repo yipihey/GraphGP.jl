@@ -46,6 +46,17 @@ end
 nrefined_local(d::DistributedGraphGPProblem) = d.m_hi - d.m_lo + 1
 KernelAbstractions.get_backend(d::DistributedGraphGPProblem) = KernelAbstractions.get_backend(d.local_prob)
 
+# The distributed entry points below are implemented by the `GraphGPMPIExt` extension, which
+# activates only when MPI is loaded. Until then each is a catch-all fallback that explains how to
+# enable it (the extension's typed methods are more specific, so they take over once MPI is
+# loaded). This keeps MPI a *purely optional* dependency: `using GraphGP` needs no MPI, and a
+# user who forgets `using MPI` gets a clear message instead of a bare MethodError.
+@noinline function _mpi_required(fname::String)
+    error("GraphGP.$fname requires the MPI extension, which is not loaded. Add MPI to your " *
+          "environment and run `using MPI` alongside `using GraphGP` to enable distributed " *
+          "GraphGP. See julia/GraphGP/bench/distributed/README.md.")
+end
+
 """
     distribute(prob::GraphGPProblem, comm; scheme = :replicate_coords) -> DistributedGraphGPProblem
 
@@ -53,7 +64,7 @@ Partition `prob` across the ranks of MPI communicator `comm`. Requires `using MP
 keeps the full `coords` and its balanced contiguous slice of `neighbors`; on a GPU backend each
 rank binds to its node-local GPU first. See `ext/GraphGPMPIExt.jl`.
 """
-function distribute end
+distribute(args...; kwargs...) = _mpi_required("distribute")
 
 """
     distributed_build_graph(points, comm, n0, k, bins, vals; backend, lattice_bits) -> DistributedGraphGPProblem
@@ -65,7 +76,7 @@ full `neighbors` is never materialised on any one rank. The result is in tree or
 but NOT for forward `generate` (which needs depth batches; build that with `build_graph_ka` or a
 later distributed depth-sort). Requires `using MPI`.
 """
-function distributed_build_graph end
+distributed_build_graph(args...; kwargs...) = _mpi_required("distributed_build_graph")
 
 """
     distributed_quantize(points_local, comm; bits = 21) -> (coords_local, origin, scale)
@@ -74,7 +85,7 @@ Quantise spatially-partitioned points onto a globally-consistent integer lattice
 box is reduced across ranks (`Allreduce` min/max), then each rank quantises its local points.
 Foundation for scheme B (partitioned coords, 10B+). Requires `using MPI`.
 """
-function distributed_quantize end
+distributed_quantize(args...; kwargs...) = _mpi_required("distributed_quantize")
 
 # --- internal reduction shims (implemented in the MPI extension) ---
 # `_dist_allreduce_sum(x::Float64, comm) -> Float64`  : sum-allreduce of a scalar.
