@@ -15,6 +15,7 @@ include("loadref.jl")
     include("test_extras.jl")
     include("test_dense.jl")
     include("test_orchestrate.jl")
+    include("test_ordering.jl")
     include("test_graph_build.jl")
 end
 

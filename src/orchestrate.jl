@@ -9,22 +9,28 @@
     generate(prob, xi; backend) -> Vector{T}
 
 Full GP forward generation: sample all N points given unit-normal parameters `xi`.
-`xi[1:n0]` feeds the dense first layer; `xi[n0+1:N]` feeds the refinement.
-If `prob.indices` is set, output is reordered to the original point ordering.
+Both `xi` and the returned field are in the ORIGINAL point order (drop-in for Python
+`graphgp.generate`): when `prob.indices` is set, `xi` is gathered original→tree on input and
+the field is scattered tree→original on output, so no caller-side reordering is needed. (With
+`prob.indices === nothing` the graph is already in tree order and both steps are the identity.)
+Internally `xi[1:n0]` (tree order) feeds the dense first layer and `xi[n0+1:N]` the refinement.
 Matches `refine.py:generate`.
 """
 function generate(prob::GraphGPProblem{T}, xi::AbstractVector{T};
         backend = KernelAbstractions.get_backend(prob)) where {T}
     n0 = prob.n0
+    # Gather xi original→tree (graph.indices[tree_pos] = original_pos), matching Python; identity
+    # when indices is nothing (no allocation).
+    xi_ord = prob.indices !== nothing ? xi[_move_to_backend(prob.indices, backend)] : xi
     # Dense layer.
     v_dense = generate_dense(view(prob.coords, :, 1:n0), prob.scale, prob.bins, prob.vals,
-        xi[1:n0])
+        xi_ord[1:n0])
     # Refinement layer (sequential scan over depth batches).
     N = npoints(prob)
     values = KernelAbstractions.zeros(backend, T, N)
     copyto!(view(values, 1:n0), v_dense)
-    refine!(values, prob, xi[n0+1:end]; backend = backend)
-    # Reorder to original ordering if the problem was built from a permuted graph.
+    refine!(values, prob, xi_ord[n0+1:end]; backend = backend)
+    # Scatter the field tree→original if the problem was built from a permuted graph.
     if prob.indices !== nothing
         out = similar(values)
         idx = _move_to_backend(prob.indices, backend)   # index vector must be on-device for GPU
@@ -37,14 +43,16 @@ end
 """
     generate_inv(prob, values; backend) -> Vector{T}
 
-Inverse of `generate`: recover unit-normal parameters `xi` from observed GP values.
-If `prob.indices` is set, values are permuted from original to tree/depth order first.
-Matches `refine.py:generate_inv`.
+Inverse of `generate`: recover unit-normal parameters `xi` from observed GP values. Both
+`values` and the returned `xi` are in the ORIGINAL point order (drop-in for Python
+`graphgp.generate_inv`): when `prob.indices` is set, `values` is gathered original→tree on input
+and `xi` is scattered tree→original on output. Exact inverse of [`generate`](@ref) in original
+order. (Identity reordering when `prob.indices === nothing`.) Matches `refine.py:generate_inv`.
 """
 function generate_inv(prob::GraphGPProblem{T}, values::AbstractVector{T};
         backend = KernelAbstractions.get_backend(prob)) where {T}
     n0 = prob.n0
-    # Permute to tree/depth order if needed.
+    # Gather values original→tree if needed.
     values_ord = if prob.indices !== nothing
         values[_move_to_backend(prob.indices, backend)]
     else
@@ -55,11 +63,17 @@ function generate_inv(prob::GraphGPProblem{T}, values::AbstractVector{T};
     # Dense inverse (host LAPACK; small block).
     xi_dense = generate_dense_inv(view(prob.coords, :, 1:n0), prob.scale, prob.bins, prob.vals,
         values_ord[1:n0])
-    # Assemble the full xi on the problem's backend (dense block first, then refined).
+    # Assemble the full xi (tree order: dense block first, then refined).
     N = npoints(prob)
     xi = KernelAbstractions.zeros(backend, T, N)
     copyto!(view(xi, 1:n0), xi_dense)        # host → device if on GPU
     copyto!(view(xi, n0 + 1:N), xi_ref)
+    # Scatter xi tree→original so input and output share the original ordering.
+    if prob.indices !== nothing
+        out = similar(xi)
+        out[_move_to_backend(prob.indices, backend)] = xi
+        return out
+    end
     return xi
 end
 

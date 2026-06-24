@@ -380,13 +380,14 @@ end
     generate_grad_xi(prob, vbar; backend) -> x̄
 
 Vector-Jacobian product of `generate(prob, xi)` with respect to `xi`, for an output cotangent
-`vbar` (same length/ordering as `generate`'s output). `generate` is linear in `xi`, so this is
-exact. Returns `x̄` (tree/depth order, length `N`) on `prob`'s backend.
+`vbar`. Both `vbar` and the returned `x̄` are in the ORIGINAL point order, matching `generate`'s
+original-order input/output convention. `generate` is linear in `xi`, so this is exact.
 
-The conditional mean/std weights are computed with the existing parallel kernel; the reverse
-accumulation over depth batches (transpose of the causal generation sweep) is done on the host
-(it is inherently sequential across batches), then the dense first-layer adjoint `Lᵀ·v̄[1:n0]`
-is applied. Used by the `rrule` for `generate`, so AD frameworks can backprop through samples.
+`generate` is `Scatter ∘ L ∘ Gather` (gather xi original→tree, the linear tree-order map `L`,
+scatter the field tree→original), so its adjoint is `Scatter ∘ Lᵀ ∘ Gather`: gather `vbar`
+original→tree, apply `Lᵀ` (the reverse depth-batch sweep + dense `Lᵀ·v̄[1:n0]`), then scatter the
+result tree→original. The mean/std weights use the existing parallel kernel; the reverse sweep
+runs on the host (sequential across batches). Used by the `rrule` for `generate`.
 """
 function generate_grad_xi(prob::GraphGPProblem{T}, vbar::AbstractVector;
         backend = KernelAbstractions.get_backend(prob)) where {T}
@@ -443,6 +444,15 @@ function generate_grad_xi(prob::GraphGPProblem{T}, vbar::AbstractVector;
     L = _dense_chol_L(Kd)
     xg[1:n0] = transpose(L) * vb[1:n0]
 
+    # Scatter the (tree-order) x̄ back to original order — adjoint of generate's input gather.
+    if prob.indices !== nothing
+        idx = prob.indices
+        out = similar(xg)
+        @inbounds for i in 1:N
+            out[idx[i]] = xg[i]
+        end
+        xg = out
+    end
     return _move_to_backend(xg, backend)
 end
 
