@@ -1,8 +1,7 @@
-"""Peak GPU memory of the graphgp CUDA EXTENSION (the fair baseline) on the FORWARD pass
-(white noise xi -> correlated field). The extension is forward-only — it has no autodiff — so the
-DERIVATIVES of the forward pass (d/dxi, d/dcov_vals) cannot be computed by it at all; those are a
-GraphGP.jl-unique capability (run_gradmem.jl). We therefore baseline forward memory here and mark
-derivatives as unsupported.
+"""Peak GPU memory + time of the graphgp CUDA EXTENSION (the fair baseline) on the FORWARD pass
+(white noise xi -> correlated field) AND its derivatives. The extension differentiates the forward
+pass w.r.t. BOTH xi and cov_vals, on-GPU and fast — so we measure all three. (GraphGP.jl provides
+the same analytic adjoints but with a host-bound reverse sweep; compare with run_gradmem.jl.)
 
     python run_gradmem.py N [K]
 
@@ -51,8 +50,23 @@ try:
 except Exception as e:
     fwd = {"peak_mb": None, "ms": None, "ok": False, "err": type(e).__name__}
 
+w = jr.normal(jr.key(2), (N,), dtype=jnp.float32)
+
+
+def grad_run(label, fn, arg):
+    try:
+        g = jax.jit(jax.grad(fn))
+        jax.block_until_ready(g(arg))
+        t0 = time.perf_counter(); jax.block_until_ready(g(arg)); dt = time.perf_counter() - t0
+        return {"peak_mb": round(peak_mb(), 1), "ms": round(1e3 * dt, 1), "ok": True}
+    except Exception as e:
+        return {"ok": False, "err": type(e).__name__}
+
+
+# The extension differentiates the forward pass w.r.t. xi and cov_vals (on-GPU).
+d_dxi = grad_run("d_dxi", lambda x: jnp.sum(w * gp.generate(graph, cov, x, cuda=True)), xi)
+d_dvals = grad_run("d_dvals", lambda vv: jnp.sum(w * gp.generate(graph, (cov[0], vv), xi, cuda=True)), cov[1])
+
 res = {"path": "cuda-ext-gpu", "N": N, "K": K,
-       "forward_generate": fwd,
-       "d_dxi": "unsupported (extension has no autodiff)",
-       "d_dvals": "unsupported (extension has no autodiff)"}
+       "forward_generate": fwd, "d_dxi": d_dxi, "d_dvals": d_dvals}
 print("GRADMEM " + json.dumps(res))

@@ -17,15 +17,16 @@ science carry no more); correctness is cross-checked in Float64 where it clarifi
   extension is launch-overhead-bound below ~5 M points). The *full* `generate` forward is the
   exception — its host-orchestrated sequential depth-batch apply is ~2.5× slower than the
   extension at 10 M (§2); moving that to the device is the next lever.
-- **Differentiation: analytic vs autodiff.** Pure-JAX graphgp *does* differentiate the forward
-  pass (`d/dxi` and `d/dcov_vals`; the inverse pass is `d/dxi`-only at present) — but by
-  materialising the `(M,k+1,k+1)` tensor and autodiffing through it, so it is slow and OOMs at
-  scale. The CUDA extension has **no autodiff** at all. GraphGP.jl provides the same derivatives
-  via hand-written **analytic adjoints** — w.r.t. the covariance table, hyperparameters, the
-  white noise, point positions, **and now the kernel derivative of the generated field** — at a
-  small peak-GPU-memory footprint (~25 MB working set).
-- **CPU too.** A native multithreaded CPU path (the same fused kernel) reaches ~20 M pts/s — the
-  only fused CPU implementation of this core.
+- **Differentiation: GraphGP.jl is portable, not faster.** Both the CUDA extension and pure-JAX
+  differentiate the forward pass w.r.t. `xi` **and** `cov_vals` — and the CUDA extension does so
+  on-GPU and fast (d/dxi 16 ms, d/dcov_vals 82 ms at 1 M). GraphGP.jl provides the same analytic
+  adjoints (plus log-det/inverse-loss/point gradients), composable through Julia's ChainRules/
+  Zygote and running on CPU **and** GPU — but its GPU reverse sweep is currently **host-bound**,
+  so it is ~5× slower on d/dxi and much slower on d/dcov_vals than the extension (§4). GraphGP.jl's
+  value is portability + analytic composability, **not** derivative speed; closing the host-bound
+  reverse sweep is an open lever.
+- **CPU.** A native multithreaded CPU path (the same fused kernel) reaches ~20 M pts/s — the CUDA
+  extension is GPU-only, so this is GraphGP.jl's CPU story, not a head-to-head.
 - **Robust.** Coincident / lattice-collision points (real catalogues) stay finite on the GPU and
   agree with the CPU; degenerate blocks contribute a regularised, near-zero-information
   conditional instead of NaN.
@@ -68,9 +69,10 @@ GraphGP.jl is at parity with the extension at scale and 2–5× ahead at small/m
 extension is launch-overhead-bound); the extension edges ~7% ahead only on logdet at 20 M. Both
 are fused — neither materialises the per-point tensor.
 
-`refine_logdet_grad_vals` (gradient w.r.t. the covariance table): **30–37 M pts·s⁻¹** in
-GraphGP.jl across 200 K–20 M. The CUDA extension **has no autodiff rule** for this op (pure-JAX
-can, via autodiff, but ~1000× slower — see §4).
+`refine_logdet_grad_vals` (gradient of the *log-det* w.r.t. the covariance table): **30–37
+M pts·s⁻¹** in GraphGP.jl across 200 K–20 M. (The CUDA extension differentiates the forward
+*generate* on-GPU — see §3/§4 — but its v0.0.4 had no autodiff rule for the log-det op
+specifically; pure-JAX can but is ~1000× slower.)
 
 ### Scaling to 10 M points, K=8
 
@@ -95,45 +97,44 @@ sweep onto the device is the clear next performance lever.
 Peak GPU memory at 10 M, K=8 (all sub-GB, comfortably within 48 GB): GraphGP.jl forward 700 MB,
 d/dxi 400 MB, d/dcov_vals 360 MB; CUDA-ext forward 1.0 GB.
 
-## 3. Peak GPU memory
+## 3. Forward-pass derivatives — speed and memory (A6000, 1 M, K=8)
 
-A6000, K=30, Float32. Both forward paths are fused (no `(M,k+1,k+1)` materialisation), so both
-are low-memory. The headline is the **derivatives**, which only GraphGP.jl can compute.
+The CUDA extension differentiates the forward pass on-GPU; GraphGP.jl differentiates it
+analytically but with a **host-bound reverse sweep**. So the extension is faster here, while
+GraphGP.jl uses less device memory (it keeps only `mean_vec`/`std` on the GPU). Time / peak:
 
-| op | GraphGP.jl (analytic) | CUDA extension | pure-JAX (autodiff) |
-| --- | --- | --- | --- |
-| forward `generate` | ~32 MB @200 K, ~158 MB @1 M | ~90 / 210 MB †, fused | materialises `(M,k+1,k+1)` |
-| **d/dxi** (white-noise → field) | **~26 MB @200 K, ~128 MB @1 M** | none (no autodiff) | autodiff: materialise + tape, OOMs at scale |
-| **d/dcov_vals** (kernel derivative of the field) | **~25 MB @200 K** | none (no autodiff) | autodiff: ditto |
+| op | graphgp-cuda | GraphGP.jl |
+| --- | --- | --- |
+| d/dxi (white-noise → field) | **15.8 ms**, ~109 MB | 78 ms (host-bound), ~40 MB |
+| d/dcov_vals (kernel derivative) | **82 ms**, ~118 MB | 4.1 s (host-bound), ~36 MB |
 
-† The extension's figure is JAX's `peak_bytes_in_use`; GraphGP.jl's is CUDA.jl's per-call
-`@allocated` — not the identical metric, so read the forward row as "both low / no
-materialisation", not a precise ratio. The derivative rows are the point: pure-JAX *can* compute
-these (it has the autodiff), but by materialising the per-point tensor + the reverse-mode tape —
-far higher peak memory (the cov_vals gradient is ~12 s at 200 K and OOMs by 20 M). GraphGP.jl's
-analytic adjoints do it at a few tens of MB; the CUDA extension cannot at all. (Only
-`mean_vec`/`std` live on the GPU for the adjoints — the reverse sweep is on host, see §6.)
+The memory metrics differ (extension = JAX `peak_bytes_in_use`; GraphGP.jl = CUDA.jl per-call
+`@allocated`), so the MB are indicative, not a strict head-to-head. The clear story is *speed*:
+GraphGP.jl's reverse depth-batch sweep runs on the host (it is sequential across the ~depth
+batches), so the GPU sits idle — ~5× slower on d/dxi and far slower on d/dcov_vals than the
+extension's on-GPU derivative. Moving the reverse sweep onto the device is the open lever (and
+it interacts with the depth-batch count — see §6).
 
 ## 4. The differentiability surface
 
-Three ways to differentiate this model: GraphGP.jl's hand-written **analytic** adjoints,
-pure-JAX **autodiff** (correct but materialise-then-differentiate → slow, OOMs at scale), and the
-CUDA extension (**none** — forward-only). All of GraphGP.jl's are composable through
-ChainRules/Zygote.
+Both the CUDA extension and pure-JAX differentiate the forward pass w.r.t. `xi` and `cov_vals`.
+GraphGP.jl matches that surface with hand-written **analytic** adjoints (plus log-det,
+inverse-loss, and point-position gradients), composable through Julia's ChainRules/Zygote and
+running on CPU and GPU. So GraphGP.jl's contribution is **portability + analytic composability in
+Julia**, not a capability the others lack.
 
-| derivative | GraphGP.jl | pure-JAX | CUDA ext |
+| derivative | GraphGP.jl | graphgp-cuda | pure-JAX |
 | --- | --- | --- | --- |
-| ∂ generate / ∂ xi (white noise) | ✅ analytic | ✅ autodiff | ❌ |
-| ∂ generate / ∂ cov_vals (kernel derivative of the field) | ✅ analytic (new) | ✅ autodiff | ❌ |
-| ∂ log-det / ∂ cov_vals (and hyperparameters) | ✅ analytic | ✅ autodiff | ❌ |
-| ∂ ½‖generate_inv‖² / ∂ cov_vals | ✅ analytic | ⚠️ inverse-pass autodiff is `xi`-only at present | ❌ |
-| ∂ (log-det, inverse-loss) / ∂ point positions | ✅ analytic | ✅ autodiff | ❌ |
+| ∂ generate / ∂ xi | ✅ analytic | ✅ (on-GPU, fast) | ✅ autodiff |
+| ∂ generate / ∂ cov_vals | ✅ analytic (new) | ✅ (on-GPU, fast) | ✅ autodiff |
+| ∂ log-det / ∂ cov_vals (+ hyperparameters) | ✅ analytic | (forward-pass rules; log-det rule absent in v0.0.4) | ✅ autodiff |
+| ∂ ½‖generate_inv‖² / ∂ cov_vals | ✅ analytic | — | ⚠️ inverse autodiff is `xi`-only |
+| ∂ (log-det, inverse-loss) / ∂ point positions | ✅ analytic | — | ✅ autodiff |
 
-So GraphGP.jl's value here is *analytic* adjoints — same answer as JAX autodiff, but fast and
-low-memory rather than materialise-and-tape. All validated against finite differences and/or JAX;
-the new field-vals adjoint (`generate_grad_vals`) matches FD to ~1e-9 and composes through Zygote
-(with the d/dxi tangent). (Honest gap, matching the Python side: the inverse pass differentiates
-`xi` but not yet the input values w.r.t. `cov_vals` analytically end-to-end.)
+GraphGP.jl's adjoints are validated against finite differences and JAX (`generate_grad_vals`
+matches FD to ~1e-9, composes through Zygote). The honest standing on derivatives: same results,
+**slower than the extension on GPU** (host-bound reverse sweep, §3), but available on CPU too and
+composable with Julia AD. The pure-JAX inverse pass differentiates `xi` but not yet `cov_vals`.
 
 ## 5. CPU path (native multithreaded + NUMA)
 
