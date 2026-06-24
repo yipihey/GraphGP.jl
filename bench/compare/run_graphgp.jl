@@ -22,28 +22,43 @@ T = dtype_arg == "f64" ? Float64 : Float32
 ops = split(ops_arg, ",")
 
 d = npzread(in_npz)
-coords = permutedims(UInt32.(d["coords"]))            # (N,D) -> (D,N)
-neighbors = permutedims(Int.(d["neighbors"])) .+ 1    # (M,K) 0-based -> (K,M) 1-based
-offsets = Int.(d["offsets"])
-n0 = Int(d["n0"]); scale = T(d["scale"])
+n0 = Int(d["n0"])
 bins = T.(d["cov_bins32"]); vals = T.(d["cov_vals32"])
-indices = haskey(d, "indices") ? (Int.(vec(d["indices"])) .+ 1) : nothing   # 0-based -> 1-based
+hasaniso = haskey(d, "aniso_grid")
 
-# Anisotropic kernel K(Δspatial, Δz): the dumped grid already carries the jitter (applied in
-# Python build_anisotropic_covariance), so construct with jitter=0. NPZ preserves the (n_s,n_z)
-# logical shape; parity is checked against the fork's aniso.py.
-prob = if haskey(d, "aniso_grid")
-    sb = T.(vec(d["aniso_spatial_bins"]))
-    zb = T.(vec(d["aniso_z_bins"]))
-    grid = T.(d["aniso_grid"])                         # (n_s, n_z)
-    alpha = T(d["aniso_alpha"][])
-    cov = build_anisotropic_covariance(sb, zb, grid, alpha; jitter = 0)
-    GraphGPProblem(coords, neighbors, offsets, n0, scale, cov, indices)
+# Build the anisotropic cov on `bk` (CuArrays for GPU). The dumped grid already carries the jitter
+# (applied in Python build_anisotropic_covariance). NPZ preserves the (n_s,n_z) logical shape.
+make_aniso(bk) = AnisoCov(
+    bk === nothing ? T.(vec(d["aniso_spatial_bins"])) : CuArray(T.(vec(d["aniso_spatial_bins"]))),
+    bk === nothing ? T.(vec(d["aniso_z_bins"]))       : CuArray(T.(vec(d["aniso_z_bins"]))),
+    bk === nothing ? T.(d["aniso_grid"])              : CuArray(T.(d["aniso_grid"])),
+    T(d["aniso_alpha"][]))
+
+prob = if haskey(d, "build_points")
+    # BUILD-IN-JULIA: tree → neighbors → depth → quantize, all on the backend (GPU if usegpu), then
+    # (for aniso) swap in the AnisoCov. The whole graph build + generate runs in this one process.
+    kbuild = Int(d["k"][])
+    pts = T.(d["build_points"])                        # (N, D) real embedded points
+    backend = usegpu ? CUDABackend() : CPU()
+    ptsb = usegpu ? CuArray(pts) : pts
+    binsb = usegpu ? CuArray(bins) : bins
+    valsb = usegpu ? CuArray(vals) : vals
+    p = build_graph_ka(ptsb, n0, kbuild, binsb, valsb; backend = backend)
+    hasaniso ? GraphGPProblem(p.coords, p.neighbors, p.offsets, p.n0, p.scale,
+                              make_aniso(usegpu ? backend : nothing), p.indices) : p
 else
-    GraphGPProblem(coords, neighbors, offsets, n0, scale, bins, vals, indices)
-end
-if usegpu
-    prob = to_backend(prob, CUDABackend())
+    # PREBUILT graph dumped from Python.
+    coords = permutedims(UInt32.(d["coords"]))        # (N,D) -> (D,N)
+    neighbors = permutedims(Int.(d["neighbors"])) .+ 1  # (M,K) 0-based -> (K,M) 1-based
+    offsets = Int.(d["offsets"]); scale = T(d["scale"])
+    indices = haskey(d, "indices") ? (Int.(vec(d["indices"])) .+ 1) : nothing
+    pr = hasaniso ?
+        GraphGPProblem(coords, neighbors, offsets, n0, scale,
+                       build_anisotropic_covariance(T.(vec(d["aniso_spatial_bins"])),
+                           T.(vec(d["aniso_z_bins"])), T.(d["aniso_grid"]), T(d["aniso_alpha"][]);
+                           jitter = 0), indices) :
+        GraphGPProblem(coords, neighbors, offsets, n0, scale, bins, vals, indices)
+    usegpu ? to_backend(pr, CUDABackend()) : pr
 end
 
 results = Dict{String,Any}()
