@@ -199,22 +199,22 @@ byte-identical to JAX — sort tie-breaking differs).
 
 ```bash
 # GPU forward throughput vs the CUDA extension (one shared real graph)
-python julia/GraphGP/test/bench_realgraph.py 5000000 10 3 /tmp/rg.npz
-julia --project=julia/GraphGP/bench julia/GraphGP/test/bench_realgraph.jl /tmp/rg.npz
+python test/bench_realgraph.py 5000000 10 3 /tmp/rg.npz
+julia --project=bench test/bench_realgraph.jl /tmp/rg.npz
 
 # forward + d/dxi + d/dcov_vals: CUDA-extension baseline (time + peak GPU memory), K=8
 XLA_PYTHON_CLIENT_PREALLOCATE=false JAX_PLATFORMS=cuda \
-  .venv-gpu/bin/python julia/GraphGP/bench/compare/run_gradmem.py 1000000 8
-julia --project=julia/GraphGP/bench julia/GraphGP/bench/compare/run_gradmem.jl 200000 8  # GraphGP.jl side
+  .venv-gpu/bin/python bench/compare/run_gradmem.py 1000000 8
+julia --project=bench bench/compare/run_gradmem.jl 200000 8  # GraphGP.jl side
 
 # build_graph byte-identity vs Python's pure-JAX gp.build_graph (needs jax + graphgp)
 # python -c "...gp.build_graph(pts,n0=128,k=8); np.savez(...)"  then compare in Julia (see §7)
 
 # CPU throughput (NUMA-pinned)
-julia -t 128 --project=julia/GraphGP/bench julia/GraphGP/test/bench_cpu_pin.jl numa 2000000
+julia -t 128 --project=bench test/bench_cpu_pin.jl numa 2000000
 
 # correctness: full suite (CPU + auto GPU testset) + opt-in Python parity
-julia --project=julia/GraphGP -e 'using Pkg; Pkg.test()'
+julia --project=. -e 'using Pkg; Pkg.test()'
 ```
 
 See also [`test/GPU_BENCHMARK_RESULTS.md`](../test/GPU_BENCHMARK_RESULTS.md) (full 0.2 M–20 M

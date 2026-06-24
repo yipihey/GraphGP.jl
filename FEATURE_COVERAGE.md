@@ -1,7 +1,7 @@
 # GraphGP.jl feature-coverage audit vs Python `graphgp`
 
-Audit of whether the Julia rewrite (`julia/GraphGP/`) covers the capabilities of the
-reference Python/JAX package (`graphgp/`). Date: 2026-06. Based on a function-by-function
+Audit of whether this Julia rewrite covers the capabilities of the reference Python/JAX
+package ([graphgp](https://github.com/yipihey/graphgp)). Date: 2026-06. Based on a function-by-function
 inventory of both source trees.
 
 > **Update (2026-06, post-implementation).** Most gaps from the original audit are now closed:
@@ -90,7 +90,7 @@ an arbitrary user loss), Python is more flexible.
 - Backend-agnostic single kernel source (CPU + CUDA) via KernelAbstractions.
 
 ## Stale documentation found
-- `julia/GraphGP/README.md` states the k-d tree build / neighbor query / depth ordering "stay
+- `README.md` states the k-d tree build / neighbor query / depth ordering "stay
   in the Python/JAX side" and that the package "owns only the hot per-point inner loop." That
   is no longer accurate: `tree.jl` + `graph_build.jl` implement the full pipeline in Julia
   (CPU). The README should be updated when GraphGP.jl is split into a standalone library.

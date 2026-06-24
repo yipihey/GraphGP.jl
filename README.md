@@ -1,7 +1,7 @@
 # GraphGP.jl
 
 A standalone Julia rewrite of
-[graphgp](../../README.md) (scalable Gaussian processes via a Vecchia /
+[graphgp](https://github.com/yipihey/graphgp) (scalable Gaussian processes via a Vecchia /
 nearest-neighbor-graph approximation), using
 [KernelAbstractions.jl](https://github.com/JuliaGPU/KernelAbstractions.jl) for
 backend-agnostic CPU + GPU kernels, hand-written analytic adjoints, and
@@ -72,12 +72,12 @@ hand-written analytic Cholesky pullback; on CPU it accumulates into per-task pri
 histograms (no atomics), on GPU it scatters with atomics (the one-workitem-per-point design
 targets CUDA.jl — GPU validation runs on hardware with a GPU, not available in CI here).
 
-Reproduce: `julia -t auto --project=julia/GraphGP julia/GraphGP/test/bench.jl 200000 10 3`
-and `python julia/GraphGP/test/bench_jax.py 200000 10 3`.
+Reproduce: `julia -t auto --project=. test/bench.jl 200000 10 3`
+and `python test/bench_jax.py 200000 10 3`.
 
 GPU benchmarks (GraphGP.jl vs JAX vs the custom `graphgp-cuda` reference, on an RTX A6000)
 live in [`test/GPU_BENCHMARK_RESULTS.md`](test/GPU_BENCHMARK_RESULTS.md); they run from the
-dedicated environment in `bench/` (`julia --project=julia/GraphGP/bench …`) so the package
+dedicated environment in `bench/` (`julia --project=bench …`) so the package
 itself stays CUDA-free.
 
 ## Usage
@@ -98,8 +98,8 @@ GPU backend automatically (KernelAbstractions).
 Reference inputs/outputs (and gradients) are dumped from the JAX implementation:
 
 ```bash
-python julia/GraphGP/test/dump_reference.py        # writes test/reference/*.npz
-julia --project=julia/GraphGP -e 'using Pkg; Pkg.test()'
+python test/dump_reference.py        # writes test/reference/*.npz
+julia --project=. -e 'using Pkg; Pkg.test()'
 ```
 
 Tests assert the f32 kernels track JAX f32 closely and stay within a bounded distance of the

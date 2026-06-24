@@ -113,7 +113,7 @@ runs on CPU **and** GPU **and** differentiates.
 
 ## What's new in the Julia port (map)
 
-The port lives entirely under [`julia/GraphGP/`](../). It is a standalone Julia package — no
+The port is this repository (`GraphGP.jl`). It is a standalone Julia package — no
 Python or C++ dependency — built on KernelAbstractions so one kernel set runs on CPU and CUDA.
 
 - **One fused kernel, two backends.** [`src/kernels.jl`](../src/kernels.jl) (one workitem per
@@ -142,15 +142,15 @@ Python or C++ dependency — built on KernelAbstractions so one kernel set runs 
 
 ```bash
 # the comparison in this note (correctness cross-check + throughput)
-cd julia/GraphGP/bench/compare
+cd bench/compare
 ./run_all.sh 2000000 10 3 64      # N K D NTHREADS
 cat results/report.md             # also committed as sample_report_2M.md
 
 # the package test suite (CPU + auto GPU testset if CUDA is present)
-julia --project=julia/GraphGP -e 'using Pkg; Pkg.test()'
+julia --project=. -e 'using Pkg; Pkg.test()'
 
 # the example
-julia --project=julia/GraphGP julia/GraphGP/examples/parity_and_autodiff.jl
+julia --project=. examples/parity_and_autodiff.jl
 ```
 
 See [`bench/compare/README.md`](../bench/compare/README.md) for knobs and the per-path scripts.

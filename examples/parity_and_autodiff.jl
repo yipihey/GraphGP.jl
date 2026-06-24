@@ -7,7 +7,7 @@
 # AND the point positions — which the GPU CUDA extension cannot do.
 #
 # Run (CPU):
-#   julia --project=julia/GraphGP julia/GraphGP/examples/parity_and_autodiff.jl
+#   julia --project=. examples/parity_and_autodiff.jl
 # For the GPU, add CUDA to the environment and uncomment the `to_backend` block at the end.
 
 using GraphGP

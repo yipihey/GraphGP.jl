@@ -2,7 +2,7 @@
 # from python_parity_aniso.py); not part of the default suite.
 #
 #   python test/python_parity_aniso.py test/reference/aniso_parity.npz          # aniso fork env
-#   julia --project=julia/GraphGP/bench test/python_parity_aniso.jl \
+#   julia --project=bench test/python_parity_aniso.jl \
 #       test/reference/aniso_parity.npz                                          # needs NPZ
 using GraphGP, NPZ, Printf
 

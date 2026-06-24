@@ -1,7 +1,7 @@
 # Run one graph (from dump_graph.py) through GraphGP.jl on CPU or GPU and emit its outputs +
 # timings, mirroring run_jax.py.
 #
-#   julia -t <N> --project=julia/GraphGP/bench run_julia.jl <graph.npz> <correctness|timing> <cpu|gpu> <outdir>
+#   julia -t <N> --project=bench run_julia.jl <graph.npz> <correctness|timing> <cpu|gpu> <outdir>
 #
 # correctness mode runs Float64 and writes <outdir>/julia-<dev>.npz (logdet/xi/grad) for the
 # element-wise cross-check; timing mode runs Float32 and prints one JSON line of milliseconds.

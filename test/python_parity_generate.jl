@@ -2,7 +2,7 @@
 # Opt-in (needs the fixture from python_parity_generate.py); not part of the default suite.
 #
 #   python test/python_parity_generate.py test/reference/generate_parity.npz       # graphgp env
-#   julia --project=julia/GraphGP/bench test/python_parity_generate.jl \
+#   julia --project=bench test/python_parity_generate.jl \
 #       test/reference/generate_parity.npz                                          # needs NPZ
 using GraphGP, NPZ, Printf
 

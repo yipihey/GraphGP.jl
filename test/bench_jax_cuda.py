@@ -1,6 +1,6 @@
 """Benchmark the custom graphgp-cuda extension (cuda=True) — the reference implementation.
 
-    python julia/GraphGP/test/bench_jax_cuda.py [N] [K] [D]
+    python test/bench_jax_cuda.py [N] [K] [D]
 
 Times refine_logdet, refine_inv and the logdet gradient w.r.t. cov_vals using the custom
 CUDA kernels, matching the workload of bench_gpu.jl / bench_jax.py. f32, GPU.

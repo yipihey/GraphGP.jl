@@ -7,7 +7,7 @@ Builds a GraphGP problem with the existing Python/JAX code, quantizes the points
   * f64 oracle : refine_logdet / refine_inv computed in float64 on the dequantized lattice
   * f32 ref    : the same computed in float32 (apples-to-apples target for Julia f32 kernels)
 
-Run from the repo root:  python julia/GraphGP/test/dump_reference.py
+Run from the repo root:  python test/dump_reference.py
 """
 
 import os

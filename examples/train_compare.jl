@@ -5,7 +5,7 @@ Generates synthetic data from a known RBF GP, then recovers (variance, scale)
 by maximizing the log-marginal-likelihood with gradient ascent.
 
 Run from repo root:
-  /tmp/jl/bin/julia --project=julia/GraphGP julia/GraphGP/examples/train_compare.jl
+  /tmp/jl/bin/julia --project=. examples/train_compare.jl
 """
 
 using GraphGP

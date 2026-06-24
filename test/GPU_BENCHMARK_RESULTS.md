@@ -52,9 +52,9 @@ Three implementations compared:
 
 Reproduce:
 ```bash
-julia --project=julia/GraphGP/bench julia/GraphGP/test/bench_gpu.jl  <N> 10 3   # GraphGP.jl
-python julia/GraphGP/test/bench_jax.py                         <N> 10 3   # pure JAX
-python julia/GraphGP/test/bench_jax_cuda.py                    <N> 10 3   # reference CUDA
+julia --project=bench test/bench_gpu.jl  <N> 10 3   # GraphGP.jl
+python test/bench_jax.py                         <N> 10 3   # pure JAX
+python test/bench_jax_cuda.py                    <N> 10 3   # reference CUDA
 ```
 
 ## `refine_logdet` — throughput (M pts·s⁻¹) / wall (ms)
@@ -100,8 +100,8 @@ points. Cross-check at N=200 K: reference CUDA logdet = −583769.7, GraphGP.jl 
 
 Reproduce:
 ```bash
-python julia/GraphGP/test/bench_realgraph.py <N> 10 3 /tmp/rg.npz   # builds+dumps+benches JAX & CUDA
-julia --project=julia/GraphGP/bench julia/GraphGP/test/bench_realgraph.jl /tmp/rg.npz   # GraphGP.jl on same graph
+python test/bench_realgraph.py <N> 10 3 /tmp/rg.npz   # builds+dumps+benches JAX & CUDA
+julia --project=bench test/bench_realgraph.jl /tmp/rg.npz   # GraphGP.jl on same graph
 ```
 
 `refine_logdet` — throughput (M pts·s⁻¹):
@@ -155,9 +155,9 @@ workitem per node → a single thread scanning the whole segment at the top leve
 build time) to a **round-robin** split dimension (cycled by level, as in cudaKDTree/bosque),
 which needs no per-node min/max scan. The build is now sort-bound (≈78% is the per-level GPU
 `sortperm`, the natural floor of a sort-based build; ≈10% kernels). Reproduce:
-`julia --project=julia/GraphGP/bench julia/GraphGP/test/bench_tree.jl 20000000`.
+`julia --project=bench test/bench_tree.jl 20000000`.
 
-Reproduce: `julia --project=julia/GraphGP/bench julia/GraphGP/test/bench_build.jl 200000 10 3`.
+Reproduce: `julia --project=bench test/bench_build.jl 200000 10 3`.
 
 Query throughput evolution at 200 K: 0.4 M pts/s (initial, loose AABB over all points) → 3.1
 (index-range skip: skip subtrees with no preceding points, the decisive Vecchia prune) → 4.7

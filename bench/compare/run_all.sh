@@ -6,7 +6,7 @@
 #   ./run_all.sh [N] [K] [D] [NTHREADS]
 #
 # Environment knobs:
-#   PY        python with jax + graphgp        (default: ../../../../.venv-gpu/bin/python)
+#   PY        python with jax + graphgp        (default: python; set to your jax+graphgp venv)
 #   JL        julia                            (default: julia)
 #   PROJ      julia project                    (default: the bench env two levels up)
 #   CORES     taskset core list for CPU runs   (default: 0-$((NTHREADS-1)))
@@ -18,7 +18,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 N=${1:-200000}; K=${2:-10}; D=${3:-3}; NT=${4:-32}
-PY=${PY:-../../../../.venv-gpu/bin/python}
+PY=${PY:-python}
 JL=${JL:-julia}
 PROJ=${PROJ:-..}
 CORES=${CORES:-0-$((NT - 1))}

@@ -3,7 +3,7 @@
 # no autodiff tape. Compare to run_gradmem.py (JAX autodiff). Reports CUDA.jl per-call device
 # allocation and the device high-water (peak) usage.
 #
-#   julia --project=julia/GraphGP/bench/compare run_gradmem.jl N [K]
+#   julia --project=bench/compare run_gradmem.jl N [K]
 using GraphGP, CUDA, KernelAbstractions, Random, Printf
 
 N = length(ARGS) >= 1 ? parse(Int, ARGS[1]) : 200_000

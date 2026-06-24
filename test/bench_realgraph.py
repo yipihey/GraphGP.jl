@@ -2,7 +2,7 @@
 and custom graphgp-cuda paths on it, and dump it for the Julia kernels so all three
 implementations run the *identical* spatially-coherent neighbor graph.
 
-    python julia/GraphGP/test/bench_realgraph.py N [K D] [dump_path.npz]
+    python test/bench_realgraph.py N [K D] [dump_path.npz]
 
 The graph is built on points quantized onto the 21-bit/axis integer lattice (the
 representation GraphGP.jl consumes), then dequantized, so JAX/CUDA/Julia all evaluate the

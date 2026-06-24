@@ -2,7 +2,7 @@
 # GraphGP.jl and write the requested ops, in ORIGINAL point order, matching the Python graphgp
 # `generate`/`generate_inv` semantics so the field is NOT scrambled.
 #
-#   julia -t <N> --project=julia/GraphGP/bench run_graphgp.jl <in.npz> <out.npz> <cpu|gpu> <ops> <f32|f64>
+#   julia -t <N> --project=bench run_graphgp.jl <in.npz> <out.npz> <cpu|gpu> <ops> <f32|f64>
 #
 # <ops> is a comma list of: generate,generate_inv,logdet,grad  (grad = generate_logdet_grad_vals)
 #

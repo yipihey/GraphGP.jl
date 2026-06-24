@@ -3,7 +3,7 @@
 # key build, a global sortperm, gathers (points/perm/node), and child assignment. The per-level
 # global sort is expected to dominate (O(N log²N) total).
 #
-#   julia --project=julia/GraphGP/bench julia/GraphGP/test/bench_tree.jl [Nmax]
+#   julia --project=bench test/bench_tree.jl [Nmax]
 
 using GraphGP
 using GraphGP: build_tree_ka

@@ -2,7 +2,7 @@
 # KernelAbstractions k-NN query (query_preceding_neighbors_ka) — the dominant compute of the
 # build. The tree is built once on the CPU, moved to the device, and the query timed on the GPU.
 #
-#   julia --project=julia/GraphGP/bench julia/GraphGP/test/bench_build.jl [N] [K] [D]
+#   julia --project=bench test/bench_build.jl [N] [K] [D]
 #
 # NOTE: the KA query is GPU-oriented. On the KA *CPU* backend it is slower than the scalar
 # `query_preceding_neighbors` used by `build_graph`, so it is not timed here. The GPU query

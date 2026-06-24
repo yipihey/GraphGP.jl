@@ -1,6 +1,6 @@
 # Compare CPU throughput under different ThreadPinning strategies.
 #
-#   julia -t <N> --project=julia/GraphGP/bench julia/GraphGP/test/bench_cpu_pin.jl <strategy> [Npts]
+#   julia -t <N> --project=bench test/bench_cpu_pin.jl <strategy> [Npts]
 #
 # <strategy> in: none | cores | compact | spread | numa | sockets
 # This 2-socket EPYC 7763 has 128 cores / 16 NUMA nodes, so pinning (vs the OS scheduler

@@ -6,7 +6,7 @@ same random seed via numpy. Maximises the log-marginal-likelihood with
 unit-gradient ascent and reports timing for comparison with Julia.
 
 Run from repo root:
-  python julia/GraphGP/examples/train_compare.py
+  python examples/train_compare.py
 """
 
 import time

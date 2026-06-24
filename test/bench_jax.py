@@ -1,6 +1,6 @@
 """Benchmark the JAX GraphGP routines on CPU for comparison with the Julia kernels.
 
-    python julia/GraphGP/test/bench_jax.py [N] [K] [D]
+    python test/bench_jax.py [N] [K] [D]
 
 Reports median wall time and throughput for refine_logdet, refine_inv and the logdet
 gradient w.r.t. cov_vals, on a graph of N points (matching the Julia bench workload).

@@ -23,6 +23,19 @@ The pure-JAX path materialises the full `(M, k+1, k+1)` covariance tensor and ca
 `cholesky`; GraphGP.jl and the CUDA extension use a fused per-point kernel that never
 materialises it. The CUDA extension has no differentiation rule (`jax.grad` is unavailable).
 
+## Prerequisites
+
+The `jax-*` and `cuda-*` paths compare against the **Python** reference, which is a separate
+package — install it into a Python env and point `PY` at that interpreter:
+
+```bash
+pip install jax graphgp            # + graphgp_cuda for the cuda-gpu path (optional)
+export PY=/path/to/that/python
+```
+
+The `julia-*` paths need only this repository (`julia --project=bench`). If you only want the
+GraphGP.jl numbers, skip the Python paths.
+
 ## Run
 
 ```bash

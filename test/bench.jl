@@ -1,6 +1,6 @@
 # Benchmark the Julia GraphGP kernels (CPU backend; multithread with `julia -t auto`).
 #
-#   julia -t auto --project=julia/GraphGP julia/GraphGP/test/bench.jl [N] [K] [D]
+#   julia -t auto --project=. test/bench.jl [N] [K] [D]
 #
 # Reports median wall time and throughput (refined points / second) for refine_logdet,
 # refine_inv, and the logdet gradient w.r.t. cov_vals.
