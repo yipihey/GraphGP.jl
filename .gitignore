@@ -1,2 +1,6 @@
 Manifest.toml
 *.cov
+
+# local Python env for the comparison benchmarks (graphgp_cuda / jax)
+.venv-gpu/
+.venv*/

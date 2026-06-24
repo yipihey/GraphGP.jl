@@ -100,6 +100,65 @@ Conventions: `points` is `(N, D)`; internally the graph stores `coords` as `(D, 
 (`matern_kernel`) and an anisotropic kernel `K(Δspatial, Δz)` (`build_anisotropic_covariance`) are
 also provided.
 
+## Using GraphGP.jl from Python / JAX
+
+GraphGP.jl is callable from Python through [juliacall](https://github.com/JuliaPy/PythonCall.jl),
+which is the recommended way to use it from a JAX workflow.
+
+```bash
+pip install juliacall
+```
+
+```python
+from juliacall import Main as jl
+jl.seval('import Pkg; Pkg.add(url="https://github.com/yipihey/GraphGP.jl")')   # once
+jl.seval("using GraphGP")
+```
+
+Two array conventions to remember:
+
+- **2-D point arrays** must be handed over as a Julia `Matrix` —
+  `jl.Matrix(np.asfortranarray(points))` (`build_graph` dispatches on a concrete column-major
+  matrix; a raw NumPy/JAX 2-D array won't match).
+- **Vectors** (`xi`, values) pass directly, but their dtype must match the problem's element type
+  (`Float64` if you built the table with `rbf_kernel(1.0, …)`); wrap **outputs** in `np.asarray`.
+
+```python
+import numpy as np
+import jax.numpy as jnp
+from juliacall import Main as jl
+jl.seval("using GraphGP")
+
+N, D, n0, k = 10_000, 2, 100, 10
+points = np.asarray(jnp.asarray(np.random.randn(N, D)))           # (N, D)
+
+bins, vals = jl.rbf_kernel(1.0, 0.3, 1e-4, 10.0, 1000, jitter=1e-5)
+prob = jl.build_graph(jl.Matrix(np.asfortranarray(points)), n0, k, bins, vals)
+
+xi      = np.asarray(jnp.asarray(np.random.randn(N)), dtype=np.float64)  # match prob eltype
+values  = np.asarray(jl.generate(prob, xi))                       # → NumPy, feed back into JAX
+back    = np.asarray(jl.generate_inv(prob, jl.Vector(values)))    # exact inverse
+logdet  = float(jl.generate_logdet(prob))
+```
+
+### Inside a JAX program
+
+`jax.jit` / `jax.grad` cannot trace through the Julia call, so wrap it with `jax.pure_callback`:
+
+```python
+import jax
+
+def gp_generate(xi):
+    return jax.pure_callback(
+        lambda x: np.asarray(jl.generate(prob, np.asarray(x, np.float64))).astype(x.dtype),
+        jax.ShapeDtypeStruct((N,), xi.dtype), xi)
+```
+
+For gradients, use GraphGP.jl's **analytic adjoints** instead of autodiff-through-Julia: `generate`
+is linear in `xi`, so its VJP is `generate_grad_xi(prob, cotangent)`; gradients w.r.t. the
+covariance table / hyperparameters come from `refine_logdet_grad_vals` + `hyperparam_grad`. Wire
+these into a `jax.custom_vjp` when you need GraphGP inside a differentiated JAX program.
+
 ## What it adds over the JAX stack
 
 - **One fused kernel, two backends.** `src/kernels.jl` (one workitem per refined point; assemble
