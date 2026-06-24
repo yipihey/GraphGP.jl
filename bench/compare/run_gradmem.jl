@@ -26,12 +26,14 @@ CUDA.reclaim(); generate(prob, xi); CUDA.reclaim()
 falloc = CUDA.@allocated generate(prob, xi)
 ft = CUDA.@elapsed generate(prob, xi)
 
-# Derivative of the forward pass (analytic adjoint; the extension can't do this at all).
+# Derivatives of the forward pass (analytic adjoints; the CUDA extension can't do these at all).
 CUDA.reclaim(); generate_grad_xi(prob, w); CUDA.reclaim()
 galloc = CUDA.@allocated generate_grad_xi(prob, w)
 gt = CUDA.@elapsed generate_grad_xi(prob, w)
 
-# d/dcov_vals through the generated FIELD is not yet an analytic adjoint in GraphGP.jl
-# (logdet and inverse-quadratic loss gradients w.r.t. cov_vals ARE — see grad.jl).
-@printf("GRADMEM julia-gpu N=%d K=%d | forward generate: alloc=%.1f MB %.1f ms | d/dxi: alloc=%.1f MB %.1f ms | d/dcov_vals: not-yet-analytic\n",
-    N, K, falloc / 1e6, 1e3ft, galloc / 1e6, 1e3gt)
+CUDA.reclaim(); generate_grad_vals(prob, xi, w); CUDA.reclaim()
+valloc = CUDA.@allocated generate_grad_vals(prob, xi, w)
+vt = CUDA.@elapsed generate_grad_vals(prob, xi, w)
+
+@printf("GRADMEM julia-gpu N=%d K=%d | forward: alloc=%.1f MB %.1f ms | d/dxi: alloc=%.1f MB %.1f ms | d/dcov_vals: alloc=%.1f MB %.1f ms\n",
+    N, K, falloc / 1e6, 1e3ft, galloc / 1e6, 1e3gt, valloc / 1e6, 1e3vt)
