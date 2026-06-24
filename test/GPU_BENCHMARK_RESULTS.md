@@ -182,6 +182,27 @@ scalar O(N²) query.) Validated by `check_graph` + generate/inverse roundtrip. S
 `build_graph_ka(CuArray(points), …) → generate/refine/gradients` runs end-to-end on the GPU
 with no Python and no host round-trip.
 
+## CPU path — NUMA thread pinning (ThreadPinning.jl)
+
+The same KA kernels run on the CPU backend (`julia -t N`). On a **2-socket AMD EPYC 7763
+(128 cores, 16 NUMA nodes)** the forward path is memory-bandwidth-bound and scales poorly past
+~32 threads; pinning worker threads round-robin across NUMA nodes (`pinthreads(:numa)`) spreads
+the load over all memory controllers and helps the more arithmetic-heavy gradient most.
+Measured with `test/bench_cpu_pin.jl` (2 M points, K=10, D=3, f32, best-of-N):
+
+| threads | strategy | refine_logdet | refine_inv | grad (cov_vals) |
+| --- | --- | --- | --- | --- |
+| 64 | none | 2.0 | 0.9 | 4.8 |
+| 64 | `:numa` | **2.5** | 1.0 | 6.5 |
+| 128 | none | 2.2 | 0.9 | 5.4 |
+| 128 | `:numa` | 2.0 | 0.7 | **8.6** |
+
+(M pts·s⁻¹.) `:numa` gives **+35% (64 thr) to +59% (128 thr)** on the gradient and ~+25% on
+logdet; `:cores`/`:sockets` (compact placement) do not help. This is a **runtime** setting for
+CPU users — `using ThreadPinning; pinthreads(:numa)` — not a library dependency (a library must
+not pin its host application's threads). Note the CPU path remains ~100× slower than the GPU
+(255 M/s logdet); the GPU is the production path. ThreadPinning lives only in the `bench/` env.
+
 ## Takeaways
 
 - **vs the reference CUDA extension (the bar to beat):** GraphGP.jl **matches it at scale**

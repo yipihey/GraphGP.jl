@@ -4,6 +4,11 @@
 #
 # Reports median wall time and throughput (refined points / second) for refine_logdet,
 # refine_inv, and the logdet gradient w.r.t. cov_vals.
+#
+# NUMA note: on multi-socket / many-NUMA-node hosts, pin the worker threads round-robin
+# across NUMA nodes before benchmarking — `using ThreadPinning; pinthreads(:numa)`. On a
+# 2-socket EPYC 7763 (16 NUMA nodes) this gave +35% (64 thr) to +59% (128 thr) on the
+# gradient path; the bandwidth-bound forward path gains less (~+25%). See bench_cpu_pin.jl.
 
 using GraphGP
 using KernelAbstractions
