@@ -445,3 +445,82 @@ end
         end
     end
 end
+
+# On-device reverse depth-batch sweep for generate_grad_vals (d/dcov_vals of the forward field),
+# one depth batch. The transpose of the forward apply combined with the per-point Cholesky-vals
+# backward: for each refined point p in the batch (vb[p] already finalised by later batches),
+# recompute its (k+1) block, seed the factor cotangents from std̄ = vb[p]·xi[p] and
+# mean_vec̄[j] = vb[p]·v[neighbour_j], run chol_pullback!, scatter into the d_vals histogram, and
+# atomically propagate vb[neighbour] += mean_vec[j]·vb[p] for the earlier batches. `v` is the
+# forward field (tree order). Launch batches latest-first in one stream; d_vals accumulates across
+# batches (per-workgroup shared histogram flushed atomically).
+@kernel function generate_grad_vals_rev_kernel!(d_vals, vb, @Const(v), @Const(xih),
+        @Const(coords), @Const(neighbors), n0, m_lo, len, scale::T, @Const(bins), @Const(vals),
+        nbins, W, ::Val{K}, ::Val{D}) where {T, K, D}
+    hist = @localmem T (_HIST_BINS,)
+    A    = @private T (K + 1, K + 1)
+    Abar = @private T (K + 1, K + 1)
+    Lbar = @private T (K + 1, K + 1)
+    mv   = @private T (K,)
+    zbar = @private T (K,)
+    jc   = @private UInt32 (K + 1, D)
+    li = @index(Local, Linear)
+    @inbounds begin
+        i = li
+        while i <= nbins
+            hist[i] = zero(T)
+            i += W
+        end
+    end
+    @synchronize
+    t = @index(Global)
+    @inbounds if t <= len
+        m = m_lo + t - 1
+        p = n0 + m
+        vbp = vb[p]
+        _gather_joint!(jc, coords, neighbors, m, n0, Val(K), Val(D))
+        assemble_cov!(A, jc, Val(K + 1), Val(D), scale, bins, vals, nbins)
+        chol_lower!(A, Val(K + 1))
+        mean_vec_solve!(mv, A, Val(K))
+        pivfloor = T(1.5) * sqrt(eps(T)) * A[1, 1]
+        for j in 1:(K + 1), i in 1:(K + 1)
+            Lbar[i, j] = zero(T)
+        end
+        Lbar[K + 1, K + 1] = vbp * xih[p]                 # std̄
+        for j in 1:K
+            zbar[j] = vbp * v[neighbors[j, m]]            # mean_vec̄[j]
+        end
+        for i in 1:K
+            if A[i, i] > pivfloor
+                s = zbar[i]
+                for q in 1:(i - 1)
+                    s -= A[i, q] * zbar[q]
+                end
+                zbar[i] = s / A[i, i]
+            else
+                zbar[i] = zero(T)
+            end
+        end
+        for j in 1:K
+            Lbar[K + 1, j] += zbar[j]
+            for i in 1:j
+                Lbar[j, i] -= zbar[i] * mv[j]
+            end
+        end
+        chol_pullback!(Abar, Lbar, A, Val(K + 1))
+        _scatter_Abar_hist!(hist, Abar, jc, scale, bins, nbins, Val(K + 1), Val(D))
+        for j in 1:K
+            nbj = neighbors[j, m]
+            nbj > 0 && (Atomix.@atomic vb[nbj] += mv[j] * vbp)
+        end
+    end
+    @synchronize
+    @inbounds begin
+        i = li
+        while i <= nbins
+            h = hist[i]
+            h != zero(T) && (Atomix.@atomic d_vals[i] += h)
+            i += W
+        end
+    end
+end

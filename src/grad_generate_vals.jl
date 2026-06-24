@@ -117,6 +117,12 @@ function generate_grad_vals(prob::GraphGPProblem{T}, xi::AbstractVector, vbar::A
     D = ndims_space(prob)
     nb_count = nbins(prob)
 
+    # On the GPU, run the reverse sweep on-device (per-batch kernels in one stream) — same as
+    # generate_grad_xi, but each point also does its Cholesky-vals backward and scatters into the
+    # d_vals histogram. Closes the host-bound gap with the CUDA extension's on-GPU d/dcov_vals.
+    _is_cpu(backend) ||
+        return _generate_grad_vals_device(prob, xi, vbar, Val(K), Val(D), backend)
+
     mean_vec = KernelAbstractions.zeros(backend, T, K, M)
     std = KernelAbstractions.zeros(backend, T, M)
     refine_meanvec_std_kernel!(backend)(mean_vec, std, prob.coords, prob.neighbors, n0,
@@ -204,6 +210,75 @@ function generate_grad_vals(prob::GraphGPProblem{T}, xi::AbstractVector, vbar::A
     end
 
     return _move_to_backend(dv, backend)
+end
+
+# On-device generate_grad_vals: recompute the forward field, then a per-batch reverse sweep
+# (generate_grad_vals_rev_kernel!) latest-first in one stream doing each point's Cholesky-vals
+# backward + d_vals histogram scatter + vb propagation on the GPU. Dense first layer on the host.
+function _generate_grad_vals_device(prob::GraphGPProblem{T}, xi::AbstractVector,
+        vbar::AbstractVector, ::Val{K}, ::Val{D}, backend) where {T, K, D}
+    n0 = prob.n0
+    N = npoints(prob)
+    nb_count = nbins(prob)
+    offs = prob.offsets
+    W = _wgsize_scatter(backend)
+    idx_dev = prob.indices === nothing ? nothing : _move_to_backend(prob.indices, backend)
+
+    # xi gathered original→tree; forward field v (tree order) via the same dense + refine! path.
+    xib = _move_to_backend(T.(xi), backend)
+    xih = idx_dev === nothing ? copy(xib) : xib[idx_dev]
+    v = KernelAbstractions.zeros(backend, T, N)
+    v_dense = generate_dense(view(prob.coords, :, 1:n0), prob.scale, prob.bins, prob.vals,
+        @view(xih[1:n0]))
+    copyto!(view(v, 1:n0), v_dense)
+    refine!(v, prob, @view(xih[(n0 + 1):N]); backend = backend)
+
+    # vb in tree order (undo generate's output scatter), mutable; reverse-swept in place.
+    vbb = _move_to_backend(T.(vbar), backend)
+    vb = idx_dev === nothing ? copy(vbb) : vbb[idx_dev]
+
+    d_vals = KernelAbstractions.zeros(backend, T, nb_count)
+    rk = generate_grad_vals_rev_kernel!(backend)
+    @inbounds for b in length(offs):-1:2
+        m_lo = offs[b - 1] - n0 + 1
+        len = offs[b] - offs[b - 1]
+        len <= 0 && continue
+        rk(d_vals, vb, v, xih, prob.coords, prob.neighbors, n0, m_lo, len, prob.scale,
+            prob.bins, prob.vals, nb_count, W, Val(K), Val(D);
+            ndrange = cld(len, W) * W, workgroupsize = W)
+    end
+    KernelAbstractions.synchronize(backend)
+
+    # Dense first-layer backward (host): L̄[i,j] = vb[i]·xih[j]; pullback → K̄; scatter into d_vals.
+    coords_n0 = Array(view(prob.coords, :, 1:n0))
+    bins = Array(prob.bins); vals = Array(prob.vals); scale = prob.scale
+    Kd = _assemble_dense_cov(coords_n0, scale, bins, vals, n0)
+    Ld = _dense_chol_L(Kd)
+    vbh = Array(@view vb[1:n0]); xihh = Array(@view xih[1:n0])
+    Lbar_d = zeros(T, n0, n0)
+    @inbounds for j in 1:n0, i in j:n0
+        Lbar_d[i, j] = vbh[i] * xihh[j]
+    end
+    Kbar_d = zeros(T, n0, n0)
+    chol_pullback_dyn!(Kbar_d, Lbar_d, Ld, n0)
+    dv_dense = zeros(T, nb_count)
+    @inbounds for j in 1:n0
+        dv_dense[1] += Kbar_d[j, j]
+        for i in (j + 1):n0
+            sq = zero(Int64)
+            for dd in 1:D
+                di = Int64(coords_n0[dd, i]) - Int64(coords_n0[dd, j])
+                sq += di * di
+            end
+            r = sqrt(T(sq)) * scale
+            lo, wlo, whi = cov_lookup_weights(r, bins, nb_count)
+            g = Kbar_d[i, j]
+            dv_dense[lo] += g * wlo
+            dv_dense[lo + 1] += g * whi
+        end
+    end
+    d_vals .+= _move_to_backend(dv_dense, backend)
+    return d_vals
 end
 
 """
