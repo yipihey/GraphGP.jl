@@ -201,6 +201,7 @@ dependency; GPU-specific primitives are provided by a `CUDA` package extension.
 
 - [`docs/benchmarks.md`](docs/benchmarks.md) — performance, memory, correctness vs the CUDA extension.
 - [`docs/comparison_with_jax.md`](docs/comparison_with_jax.md) — design + throughput vs JAX, annotated.
+- [`docs/scaling-100B.md`](docs/scaling-100B.md) — design notes + API sketch for distributed (multi-node/GPU) scaling to ~100 B points.
 - [`FEATURE_COVERAGE.md`](FEATURE_COVERAGE.md) — function-by-function parity audit vs Python `graphgp`.
 - [`bench/compare/`](bench/compare/) — the apples-to-apples comparison harness (one shared graph).
 
