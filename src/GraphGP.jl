@@ -13,6 +13,7 @@ include("api.jl")
 include("grad.jl")
 include("extras.jl")
 include("dense.jl")
+include("aniso.jl")
 include("orchestrate.jl")
 include("tree.jl")
 include("tree_gpu.jl")
@@ -28,6 +29,8 @@ export generate_logdet_grad_vals, generate_inv_loss_grad_vals
 export generate_logdet_and_grad_vals
 # Phase 7: kernel hyperparameter layer
 export make_cov_bins, rbf_kernel, matern_kernel, hyperparam_grad
+# Anisotropic covariance K(Δspatial, Δz) — forward-only drop-in (see src/aniso.jl)
+export AnisoCov, build_anisotropic_covariance, aniso_lookup
 # Phase 8: dense first layer + orchestration
 export generate_dense, generate_dense_inv, generate_dense_logdet, compute_cov_matrix
 export generate, generate_inv, generate_logdet

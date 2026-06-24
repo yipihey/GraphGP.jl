@@ -22,9 +22,10 @@ function generate(prob::GraphGPProblem{T}, xi::AbstractVector{T};
     # Gather xi original→tree (graph.indices[tree_pos] = original_pos), matching Python; identity
     # when indices is nothing (no allocation).
     xi_ord = prob.indices !== nothing ? xi[_move_to_backend(prob.indices, backend)] : xi
-    # Dense layer.
-    v_dense = generate_dense(view(prob.coords, :, 1:n0), prob.scale, prob.bins, prob.vals,
-        xi_ord[1:n0])
+    # Dense layer (anisotropic or isotropic).
+    v_dense = prob.cov !== nothing ?
+        generate_dense_aniso(view(prob.coords, :, 1:n0), prob.scale, prob.cov, xi_ord[1:n0]) :
+        generate_dense(view(prob.coords, :, 1:n0), prob.scale, prob.bins, prob.vals, xi_ord[1:n0])
     # Refinement layer (sequential scan over depth batches).
     N = npoints(prob)
     values = KernelAbstractions.zeros(backend, T, N)
@@ -60,9 +61,11 @@ function generate_inv(prob::GraphGPProblem{T}, values::AbstractVector{T};
     end
     # Refinement inverse (on the problem's backend).
     xi_ref = refine_inv(prob, values_ord; backend = backend)
-    # Dense inverse (host LAPACK; small block).
-    xi_dense = generate_dense_inv(view(prob.coords, :, 1:n0), prob.scale, prob.bins, prob.vals,
-        values_ord[1:n0])
+    # Dense inverse (host LAPACK; small block; anisotropic or isotropic).
+    xi_dense = prob.cov !== nothing ?
+        generate_dense_inv_aniso(view(prob.coords, :, 1:n0), prob.scale, prob.cov, values_ord[1:n0]) :
+        generate_dense_inv(view(prob.coords, :, 1:n0), prob.scale, prob.bins, prob.vals,
+            values_ord[1:n0])
     # Assemble the full xi (tree order: dense block first, then refined).
     N = npoints(prob)
     xi = KernelAbstractions.zeros(backend, T, N)
@@ -86,8 +89,9 @@ Matches `refine.py:generate_logdet`.
 function generate_logdet(prob::GraphGPProblem{T};
         backend = KernelAbstractions.get_backend(prob)) where {T}
     n0 = prob.n0
-    ld_dense = generate_dense_logdet(view(prob.coords, :, 1:n0), prob.scale, prob.bins,
-        prob.vals, n0)
+    ld_dense = prob.cov !== nothing ?
+        generate_dense_logdet_aniso(view(prob.coords, :, 1:n0), prob.scale, prob.cov, n0) :
+        generate_dense_logdet(view(prob.coords, :, 1:n0), prob.scale, prob.bins, prob.vals, n0)
     ld_ref = refine_logdet(prob; backend = backend)
     return T(ld_dense) + ld_ref
 end

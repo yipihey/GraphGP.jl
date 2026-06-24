@@ -32,6 +32,18 @@ function refine_logdet_terms(prob::GraphGPProblem{T}; backend = KernelAbstractio
     K = nneighbors(prob)
     D = ndims_space(prob)
     terms = KernelAbstractions.zeros(backend, T, M)
+    if prob.cov !== nothing                                   # anisotropic kernel
+        cov = prob.cov
+        if _is_cpu(backend)
+            _native_refine_logdet_terms_aniso!(terms, prob, Val(K), Val(D))
+        else
+            refine_logdet_kernel_aniso!(backend)(terms, prob.coords, prob.neighbors, prob.n0,
+                prob.scale, cov.spatial_bins, cov.z_bins, cov.grid, T(cov.alpha), Val(K), Val(D);
+                ndrange = M, workgroupsize = _wgsize(backend))
+            KernelAbstractions.synchronize(backend)
+        end
+        return terms
+    end
     if _is_cpu(backend)
         # Native @threads loop — the KA CPU backend is 5-10x slower here (see cpu_native.jl).
         _native_refine_logdet_terms!(terms, prob, Val(K), Val(D))
@@ -56,6 +68,18 @@ function refine_inv!(xi_out, prob::GraphGPProblem{T}, values;
     M = nrefined(prob)
     K = nneighbors(prob)
     D = ndims_space(prob)
+    if prob.cov !== nothing                                   # anisotropic kernel
+        cov = prob.cov
+        if _is_cpu(backend)
+            _native_refine_inv_aniso!(xi_out, prob, values, Val(K), Val(D))
+        else
+            refine_inv_kernel_aniso!(backend)(xi_out, prob.coords, prob.neighbors, values,
+                prob.n0, prob.scale, cov.spatial_bins, cov.z_bins, cov.grid, T(cov.alpha),
+                Val(K), Val(D); ndrange = M, workgroupsize = _wgsize(backend))
+            KernelAbstractions.synchronize(backend)
+        end
+        return xi_out
+    end
     if _is_cpu(backend)
         _native_refine_inv!(xi_out, prob, values, Val(K), Val(D))
         return xi_out
@@ -95,7 +119,17 @@ function refine!(values, prob::GraphGPProblem{T}, xi;
     std = KernelAbstractions.zeros(backend, T, M)
     wgs = _wgsize(backend)
     cpu = _is_cpu(backend)
-    if cpu
+    if prob.cov !== nothing                                   # anisotropic kernel
+        cov = prob.cov
+        if cpu
+            _native_refine_meanvec_std_aniso!(mean_vec, std, prob, Val(K), Val(D))
+        else
+            refine_meanvec_std_kernel_aniso!(backend)(mean_vec, std, prob.coords, prob.neighbors,
+                prob.n0, prob.scale, cov.spatial_bins, cov.z_bins, cov.grid, T(cov.alpha),
+                Val(K), Val(D); ndrange = M, workgroupsize = wgs)
+            KernelAbstractions.synchronize(backend)
+        end
+    elseif cpu
         _native_refine_meanvec_std!(mean_vec, std, prob, Val(K), Val(D))
     else
         refine_meanvec_std_kernel!(backend)(mean_vec, std, prob.coords, prob.neighbors, prob.n0,

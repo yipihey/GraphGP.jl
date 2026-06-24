@@ -8,6 +8,17 @@
 #   offsets   :: (B,)    integer  1-based *exclusive* end index of each depth batch
 #   bins,vals :: (nbins,) T       discretized covariance (T defaults to Float32)
 #   scale     :: T                physical length per lattice step (isotropic)
+# Anisotropic covariance K(Δspatial, Δz): a 2-D table grid[i,j] = K(spatial_bins[i], z_bins[j])
+# with bilinear interpolation. Points are embedded with the LAST coordinate radial (alpha*z) and
+# the first D-1 spatial. Forward-only; see src/aniso.jl for the lookup / kernels and
+# `build_anisotropic_covariance` for the public constructor. Arrays live on `coords`'s backend.
+struct AnisoCov{T, V <: AbstractVector, M <: AbstractMatrix}
+    spatial_bins::V
+    z_bins::V
+    grid::M
+    alpha::T
+end
+
 struct GraphGPProblem{T, MC <: AbstractMatrix, MN <: AbstractMatrix, V <: AbstractVector}
     coords::MC
     neighbors::MN
@@ -20,10 +31,15 @@ struct GraphGPProblem{T, MC <: AbstractMatrix, MN <: AbstractMatrix, V <: Abstra
     # When built from Python/JAX, this is the `graph.indices` field.
     # Nothing means the identity permutation (points already in the desired order).
     indices::Union{Nothing, Vector{Int}}
+    # Optional anisotropic kernel. `nothing` → the isotropic (bins, vals) path (default,
+    # unchanged). When set, the forward ops assemble the covariance from `cov` instead, and
+    # `bins`/`vals` are unused (they hold the cov's bin axes as backend-valid placeholders).
+    cov::Union{Nothing, AnisoCov}
 
     function GraphGPProblem(coords::MC, neighbors::MN, offsets::Vector{Int}, n0::Int,
             scale::T, bins::V, vals::V,
-            indices::Union{Nothing, Vector{Int}} = nothing) where {T, MC, MN, V}
+            indices::Union{Nothing, Vector{Int}} = nothing,
+            cov::Union{Nothing, AnisoCov} = nothing) where {T, MC, MN, V}
         # All array fields that appear in @kernel launches must reside on the same device.
         # offsets and indices are always CPU (used in host dispatch loops only).
         b = KernelAbstractions.get_backend(coords)
@@ -39,8 +55,17 @@ struct GraphGPProblem{T, MC <: AbstractMatrix, MN <: AbstractMatrix, V <: Abstra
             throw(ArgumentError(
                 "vals backend ($(KernelAbstractions.get_backend(vals))) ≠ " *
                 "coords backend ($b): all kernel arrays must be on the same device"))
-        new{T, MC, MN, V}(coords, neighbors, offsets, n0, scale, bins, vals, indices)
+        new{T, MC, MN, V}(coords, neighbors, offsets, n0, scale, bins, vals, indices, cov)
     end
+end
+
+# Convenience constructor for an anisotropic problem: carry the `AnisoCov` and reuse its bin axes
+# as the (unused) `bins`/`vals` placeholders — which also enforces the cov is on `coords`'s backend.
+function GraphGPProblem(coords::AbstractMatrix, neighbors::AbstractMatrix, offsets::Vector{Int},
+        n0::Int, scale::Real, cov::AnisoCov, indices::Union{Nothing, Vector{Int}} = nothing)
+    T = eltype(cov.grid)
+    return GraphGPProblem(coords, neighbors, offsets, n0, T(scale), cov.spatial_bins,
+        cov.z_bins, indices, cov)
 end
 
 
@@ -76,5 +101,14 @@ function to_backend(prob::GraphGPProblem, backend)
         prob.offsets, prob.n0, prob.scale,
         _move_to_backend(prob.bins, backend),
         _move_to_backend(prob.vals, backend),
-        prob.indices)
+        prob.indices,
+        _cov_to_backend(prob.cov, backend))
+end
+
+# Move an AnisoCov's arrays to `backend` (the scalar `alpha` stays); `nothing` for the iso path.
+_cov_to_backend(::Nothing, backend) = nothing
+function _cov_to_backend(cov::AnisoCov, backend)
+    return AnisoCov(_move_to_backend(cov.spatial_bins, backend),
+        _move_to_backend(cov.z_bins, backend),
+        _move_to_backend(cov.grid, backend), cov.alpha)
 end

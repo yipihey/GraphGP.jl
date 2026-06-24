@@ -16,6 +16,7 @@ include("loadref.jl")
     include("test_dense.jl")
     include("test_orchestrate.jl")
     include("test_ordering.jl")
+    include("test_aniso.jl")
     include("test_graph_build.jl")
 end
 
@@ -175,6 +176,28 @@ let cuda_ok = false
                 @test isapprox(generate_logdet(pg), generate_logdet(prob); rtol = 1e-4)
                 @test isapprox(Array(generate_logdet_grad_vals(pg)),
                     generate_logdet_grad_vals(prob); rtol = 1e-3)
+            end
+
+            @testset "anisotropic generate: GPU matches CPU" begin
+                rng = MersenneTwister(0xA115)
+                Na, n0a, ka, alpha = 1200, 120, 8, 2.0
+                nh = randn(rng, Na, 3); nh ./= sqrt.(sum(abs2, nh; dims = 2))
+                za = rand(rng, Na) .* 0.5
+                pts = hcat(nh, alpha .* za)
+                sb = collect(range(0.0, 2.0; length = 20)); zb = collect(range(0.0, 1.0; length = 14))
+                grid = [exp(-(s / 0.4)^2 - (zz / 0.15)^2) for s in sb, zz in zb]
+                acov = build_anisotropic_covariance(sb, zb, grid, alpha; jitter = 1e-3)
+                db, dv = rbf_kernel(1.0, 0.3, 1e-4, 1e1, 50; jitter = 1e-3)
+                g0 = build_graph(pts, n0a, ka, db, dv)
+                acpu = GraphGPProblem(g0.coords, g0.neighbors, g0.offsets, g0.n0, g0.scale,
+                    acov, g0.indices)
+                agpu = to_backend(acpu, CUDABackend())
+                @test agpu.cov isa AnisoCov
+                xi = randn(rng, Na)
+                fc = generate(acpu, xi)
+                fg = Array(generate(agpu, CuArray(xi)))
+                @test isapprox(fg, fc; rtol = 1e-3)                       # @fastmath GPU-vs-CPU
+                @test isapprox(generate_logdet(agpu), generate_logdet(acpu); rtol = 1e-4)
             end
 
             @testset "backend consistency check" begin
