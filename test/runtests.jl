@@ -18,6 +18,7 @@ include("loadref.jl")
     include("test_ordering.jl")
     include("test_aniso.jl")
     include("test_degenerate.jl")
+    include("test_grad_generate_vals.jl")
     include("test_graph_build.jl")
 end
 
@@ -220,6 +221,22 @@ let cuda_ok = false
                 @test all(isfinite, gg)
                 @test isapprox(gg, gc; rtol = 1e-3)
                 @test isapprox(sum(v .* fg), sum(gg .* xi); rtol = 1e-4)   # adjoint identity (GPU)
+            end
+
+            @testset "generate_grad_vals (kernel derivative): GPU matches CPU" begin
+                rng = MersenneTwister(2)
+                n, Dd, n0g, kg = 3_000, 3, 128, 10
+                pts = randn(rng, n, Dd)
+                bs, vs = rbf_kernel(1.0, 0.3, 1e-4, 1e1, 80; jitter = 1e-2)
+                pc = build_graph(pts, n0g, kg, bs, vs)
+                pc32 = GraphGPProblem(pc.coords, pc.neighbors, pc.offsets, pc.n0,
+                    Float32(pc.scale), Float32.(pc.bins), Float32.(pc.vals), pc.indices)
+                pg = to_backend(pc32, CUDABackend())
+                xi = randn(rng, Float32, n); w = randn(rng, Float32, n)
+                gc = generate_grad_vals(pc32, xi, w)
+                gg = Array(generate_grad_vals(pg, CuArray(xi), CuArray(w)))
+                @test all(isfinite, gg)
+                @test isapprox(gg, gc; rtol = 1e-3)
             end
 
             @testset "backend consistency check" begin
