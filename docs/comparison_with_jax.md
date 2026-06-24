@@ -34,23 +34,38 @@ AMD EPYC 7763 (128 cores, 16 NUMA nodes) + 1× NVIDIA RTX A6000.
   *random*-neighbour synthetic graphs (worse gather locality) and JAX used real spatial graphs —
   i.e. the harder case for Julia. The shared-graph harness removes this confound entirely.
 
-## Correctness (Float64, L2-norm relative error vs JAX-CPU)
+## Correctness (Float64, L2-norm relative error vs JAX-CPU; N = 2 M)
 
 | path | logdet | xi (refine_inv) | grad ∂logdet/∂cov_vals |
 | --- | --- | --- | --- |
-| `jax-gpu` (pure JAX) | 0 | 8.6e-14 | 2.1e-15 |
-| `julia-cpu` | 0 | 1.2e-13 | 9.6e-14 |
-| `cuda-gpu` (CUDA ext, f32) | 2.7e-6 | 6.1e-5 | n/a (no autodiff) |
-| `julia-gpu` (f32/fast-math) | 5.3e-6 | 8.1e-5 | 5.4e-5 |
+| `jax-gpu` (pure JAX) | 0 | 1.3e-13 | 4.1e-15 |
+| `julia-cpu` | 0 | 1.7e-13 | 9.3e-14 |
+| `cuda-gpu` (CUDA ext, f32) | 1.1e-2 | 8.4e-5 | n/a (no autodiff) |
+| `julia-gpu` (f32/fast-math) | 2.4e-6 | 5.8e-5 | 2.3e-5 |
 
-The CPU/Float64 paths are identical to round-off (~1e-13). The GPU paths agree to ~1e-5 — the
-expected level for Float32 with fused fast-math arithmetic, and the *same* level as the CUDA
-extension. (Per-element relative error is not used here: `xi` has near-zero entries where it is
-undefined; the L2-norm relative error is the robust metric.)
+The CPU/Float64 paths are identical to round-off (~1e-13). The GPU paths agree on `xi` to
+~1e-5 — the expected level for Float32 with fused fast-math arithmetic. (Per-element relative
+error is not used here: `xi` has near-zero entries where it is undefined; the L2-norm relative
+error is the robust metric.) The `cuda-gpu` `logdet` (1.1e-2) reflects the extension summing 2 M
+per-point terms naively in Float32; GraphGP.jl's reduction is more accurate (2.4e-6).
 
 ## Throughput (Float32, M points/s; higher is better)
 
-<!-- HEADLINE_TABLE -->
+N = 2 M, K = 10, D = 3. CPU paths confined to the **same 64 cores** (pure-JAX with OpenBLAS/OMP
+capped to 64); GPU paths on 1× A6000.
+
+| path | refine_logdet | refine_inv | grad (∂cov_vals) |
+| --- | --- | --- | --- |
+| `jax-cpu` (pure JAX, 64 cores) | 0.2 | 0.1 | 0.1 |
+| `julia-cpu` (GraphGP.jl, 64 cores) | **12.8** | **12.6** | **6.4** |
+| `jax-gpu` (pure JAX) | 8.6 | 7.7 | <0.05 |
+| `cuda-gpu` (graphgp CUDA ext) | 128.1 | 115.5 | n/a (no autodiff) |
+| `julia-gpu` (GraphGP.jl) | **201.3** | **156.5** | **45.4** |
+
+At matched cores, GraphGP.jl-CPU is **~64×** (logdet) to **~126×** (inv) faster than pure-JAX-CPU.
+On GPU it is ~1.4–1.6× ahead of the CUDA extension *at this N* (still the launch-overhead
+regime — see below) and ~23× over pure-JAX-GPU, while also providing the gradient (`grad` column)
+that neither GPU alternative offers.
 
 Two regimes worth separating:
 
