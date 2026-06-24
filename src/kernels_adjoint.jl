@@ -422,3 +422,26 @@ end
     chol_pullback!(Abar, Lbar, A, Val(K + 1))
     _scatter_Abar_atomic!(d_vals, Abar, jc, scale, bins, nbins, Val(K + 1), Val(D))
 end
+
+# Transpose of refine_apply_kernel! for one depth batch (the reverse depth-batch sweep of
+# generate_grad_xi, run on-device instead of host). Given the field cotangent `vb`, emit the xi
+# cotangent xg[p] = std·vb[p] for this batch's refined points and scatter the conditional-mean
+# contributions back to their neighbours (strictly-earlier points). Atomic because batch-mates can
+# share a neighbour; batch-mates never neighbour each other (depth-batch invariant), so the reads
+# vb[p] and the scatter targets vb[neighbour] are disjoint within a batch. Launch batches
+# latest-first in one stream (stream ordering makes batch b+1's scatters visible to batch b).
+@kernel function refine_reverse_apply_kernel!(xg, vb, @Const(mean_vec), @Const(std),
+        @Const(neighbors), n0, m_lo, ::Val{K}) where {K}
+    t = @index(Global)
+    m = m_lo + t - 1
+    @inbounds begin
+        p = n0 + m
+        vbp = vb[p]
+        xg[p] = std[m] * vbp
+        for j in 1:K
+            nbj = neighbors[j, m]
+            nbj > 0 || continue
+            Atomix.@atomic vb[nbj] += mean_vec[j, m] * vbp
+        end
+    end
+end

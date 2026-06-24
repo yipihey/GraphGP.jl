@@ -397,13 +397,20 @@ function generate_grad_xi(prob::GraphGPProblem{T}, vbar::AbstractVector;
     K = nneighbors(prob)
     D = ndims_space(prob)
 
-    # mean_vec (K×M) and std (M) via the parallel kernel, then to host for the reverse sweep.
+    # mean_vec (K×M) and std (M) via the parallel kernel.
     mean_vec = KernelAbstractions.zeros(backend, T, K, M)
     std = KernelAbstractions.zeros(backend, T, M)
     refine_meanvec_std_kernel!(backend)(mean_vec, std, prob.coords, prob.neighbors, n0,
         prob.scale, prob.bins, prob.vals, nbins(prob), Val(K), Val(D);
         ndrange = M, workgroupsize = _wgsize(backend))
     KernelAbstractions.synchronize(backend)
+
+    # On the GPU, run the reverse depth-batch sweep on-device (per-batch kernels in one stream)
+    # instead of bringing mean_vec/std to the host — closes the host-bound gap with the CUDA
+    # extension's on-GPU derivative.
+    _is_cpu(backend) ||
+        return _generate_grad_xi_device(prob, vbar, mean_vec, std, Val(K), Val(D), backend)
+
     mv = Array(mean_vec)
     sd = Array(std)
     nb = Array(prob.neighbors)
@@ -454,6 +461,46 @@ function generate_grad_xi(prob::GraphGPProblem{T}, vbar::AbstractVector;
         xg = out
     end
     return _move_to_backend(xg, backend)
+end
+
+# On-device reverse depth-batch sweep for generate_grad_xi (the transpose of refine!'s forward
+# apply): per-batch refine_reverse_apply_kernel! launched latest-first in one stream, then the
+# small dense first-layer adjoint on the host. `mean_vec`/`std` stay on the device.
+function _generate_grad_xi_device(prob::GraphGPProblem{T}, vbar::AbstractVector,
+        mean_vec, std, ::Val{K}, ::Val{D}, backend) where {T, K, D}
+    n0 = prob.n0
+    N = npoints(prob)
+    offs = prob.offsets
+    wgs = _wgsize(backend)
+
+    # vb in tree order (undo generate's output scatter: vb_tree = vbar[indices]); mutable copy.
+    vbb = _move_to_backend(T.(vbar), backend)
+    vb = prob.indices !== nothing ? vbb[_move_to_backend(prob.indices, backend)] : copy(vbb)
+    xg = KernelAbstractions.zeros(backend, T, N)
+
+    rk = refine_reverse_apply_kernel!(backend)
+    @inbounds for b in length(offs):-1:2
+        m_lo = offs[b - 1] - n0 + 1
+        len = offs[b] - offs[b - 1]
+        len <= 0 && continue
+        rk(xg, vb, mean_vec, std, prob.neighbors, n0, m_lo, Val(K); ndrange = len, workgroupsize = wgs)
+    end
+    KernelAbstractions.synchronize(backend)
+
+    # Dense first-layer adjoint x̄[1:n0] = Lᵀ·v̄[1:n0] (host LAPACK; n0 is small).
+    coords_n0 = Array(view(prob.coords, :, 1:n0))
+    Kd = _assemble_dense_cov(coords_n0, prob.scale, Array(prob.bins), Array(prob.vals), n0)
+    L = _dense_chol_L(Kd)
+    xg_n0 = _move_to_backend(transpose(L) * Array(@view vb[1:n0]), backend)
+    copyto!(view(xg, 1:n0), xg_n0)
+
+    # Scatter tree→original (adjoint of generate's input gather).
+    if prob.indices !== nothing
+        out = similar(xg)
+        out[_move_to_backend(prob.indices, backend)] = xg
+        return out
+    end
+    return xg
 end
 
 """
