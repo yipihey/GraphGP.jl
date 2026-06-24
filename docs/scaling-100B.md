@@ -127,18 +127,22 @@ end
 The build is a **once-per-dataset batch job**; serialize the result (§5) and never rebuild casually.
 Validate the whole pipeline at a fat-node-buildable N (a few B) before scaling.
 
-## 5. Compact indices + out-of-core I/O ⬜
+## 5. Compact indices + checkpoint I/O ✅
 
-- **Indexing.** Global ids exceed 2³¹ past 2.1 B points, forcing Int64 `neighbors` (the 8 TB row).
-  Scheme B's **rank-local 32-bit index + owner-rank tag (~5 B/pt)** drops `neighbors` from ~8 TB to
-  **~5 TB** and falls out of the partition for free.
-- **Persistence.** Build once → write `neighbors` column-slices with MPI-IO; each rank `mmap`s or
-  scatter-loads its slice on restart; broadcast the small coords-slab metadata + lattice. Checkpoint
-  the graph as a first-class multi-TB artifact.
+- **Indexing ✅.** Global ids exceed 2³¹ past 2.1 B points, forcing Int64 `neighbors` (the 8 TB row).
+  Scheme B's `local_prob.neighbors` are **rank-local indices stored as `Int32`** (a rank holds
+  < 2³¹ coord columns), so the dominant array drops ~35 % (8 TB → ~5 TB at K=10) — it falls out of
+  the remap for free (`_scheme_b_local`).
+- **Persistence ✅.** `save_graph(dir, dprob)` / `load_graph(dir, comm)` checkpoint a distributed
+  graph: each rank writes/reads **only its own slab** (`dir/part_<rank>.jls`), so reload never
+  materialises the full graph on any rank — the "build once on a fat node → each rank loads its
+  slab" path. Validated by a save→load→refit roundtrip (logdet relerr 0) in the multi-rank test.
+  (At 100B, swap the per-rank `Serialization` blob for MPI-IO into one striped file; the API is
+  unchanged.)
 
 ```julia
-save_graph(path, dprob, comm)               # parallel write: per-rank neighbor slabs + manifest
-load_graph(path, comm) :: PartitionedGraphGPProblem   # mmap each rank's slab; broadcast metadata
+save_graph(dir, dprob)                                  # each rank writes part_<rank>.jls
+load_graph(dir, comm) :: PartitionedGraphGPProblem      # each rank reads only its own slab
 ```
 
 ## 6. Forward field generation ⬜/✅
@@ -169,23 +173,28 @@ count further. f64 reduction keeps cross-rank-count results reproducible to ~1e-
 1. **Scheme B fitting** ✅ — `:partition_coords` constructor + compacted local problem +
    order-independent reductions. Unblocks per-rank coords past the replication ceiling; validated
    multi-rank against the serial oracle (§3).
-2. **Compact indexing** ⬜ — store `local_prob.neighbors` as rank-local 32-bit + owner tag (the
-   remap already produces local indices); ~35 % off the dominant array.
-3. **From-scratch no-replication path** ⬜ — each rank reads only its slab; a neighbor-to-neighbor
-   `Alltoallv` coords/values halo replaces the replicated input (the remap/reduction are unchanged).
-4. **Distributed build** ⬜ — spatial decomp + ghost k-NN (spike bosque) + distributed depth
+2. **Compact indexing** ✅ — `local_prob.neighbors` stored as rank-local `Int32`; ~35 % off the
+   dominant array (§5).
+3. **Checkpoint I/O** ✅ — `save_graph`/`load_graph`; each rank reads only its slab on reload (§5).
+4. **From-scratch no-replication path** ⬜ — each rank reads only its slab from disk; a
+   neighbor-to-neighbor `Alltoallv` coords/values halo replaces the replicated input (the remap and
+   reductions are unchanged). The `load_graph` path already gives this from a checkpoint.
+5. **Distributed build** ⬜ — spatial decomp + ghost k-NN (spike bosque) + distributed depth
    relaxation + the distributed sort/renumber. Validate at a few-B N on a fat node, then scale.
-5. **Parallel graph I/O + checkpointing** ⬜ (`save_graph`/`load_graph`).
-6. **Distributed single-field sampling** ⬜ (per-batch halo) — only if a single field must exceed one
-   node; otherwise ensembles are free.
+   *(The hard remaining blocker; needs cluster validation.)*
+6. **Distributed single-field sampling** ⬜ (per-batch value halo) — only if a single field must
+   exceed one node; otherwise ensembles are free.
 
-**Net:** fitting at 100B is essentially solved by the merged scheme-A reduction plus scheme-B coords
-partitioning; the real investment is **distributed graph construction and its TB-scale storage**,
-with single-field sampling as an optional add-on that the shallow build has already de-risked.
+**Net:** the fitting path is now implemented and validated through scheme B — partitioned coords +
+halo, Int32 indices, and checkpoint I/O — so per-rank memory scales with rank count. The one large
+remaining piece is **distributed graph *construction*** (the from-scratch billion-to-100-billion
+k-NN build + distributed sort/renumber), which needs cluster validation; single-field sampling is an
+optional add-on the shallow build has already de-risked.
 
 ## References in this repo
 - `src/distributed.jl` — scheme-A + **scheme-B** distributed problems, reductions, entry points.
 - `ext/GraphGPMPIExt.jl` — `distribute` (both schemes), MPI shims, GPU binding, balanced ranges.
-- `bench/distributed/test_scheme_b.jl` — multi-rank scheme-B fitting vs serial + coords-compaction.
+- `bench/distributed/test_scheme_b.jl` — multi-rank scheme-B fitting vs serial, coords-compaction,
+  Int32 indices, and a `save_graph`/`load_graph` checkpoint roundtrip.
 - `test/test_scheme_b.jl` — pure `_scheme_b_local` remap unit test (no MPI).
 - `src/graph_build.jl`, `src/tree_special.jl` — the local build stages the distributed build reuses.

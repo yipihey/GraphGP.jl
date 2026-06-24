@@ -12,12 +12,13 @@ module GraphGPMPIExt
 
 using GraphGP
 using MPI
+using Serialization: serialize, deserialize
 import GraphGP: distribute, _dist_allreduce_sum, _dist_allreduce_sum!, _dist_allgather_columns,
     _dist_allreduce_min!, _dist_allreduce_max!, distributed_build_graph, distributed_quantize,
     DistributedGraphGPProblem, GraphGPProblem, nrefined,
     build_tree_ka, query_preceding_neighbors_ka, quantize_to_lattice, _move_to_backend,
     KernelAbstractions,
-    PartitionedGraphGPProblem, _scheme_b_local, _morton_key
+    PartitionedGraphGPProblem, _scheme_b_local, _morton_key, save_graph, load_graph
 
 # Balanced contiguous split of 1:M across `nranks`: the first `rem` ranks get one extra column.
 # Returns (m_lo, m_hi) 1-based inclusive; m_lo > m_hi means this rank owns no columns.
@@ -168,6 +169,35 @@ function distributed_quantize(points_local::AbstractMatrix{<:Real}, comm::MPI.Co
         coords_local[i, j] = UInt32(clamp(q, 0, lmax))
     end
     return coords_local, origin, scale
+end
+
+# --- parallel checkpoint I/O for scheme-B graphs (each rank reads/writes only its slab) ---
+
+function save_graph(dir::AbstractString, d::PartitionedGraphGPProblem)
+    rank = MPI.Comm_rank(d.comm)
+    rank == 0 && mkpath(dir)
+    MPI.Barrier(d.comm)                                  # dir exists before anyone writes
+    lp = d.local_prob
+    payload = (coords = Array(lp.coords), neighbors = Array(lp.neighbors), offsets = lp.offsets,
+        local_n0 = lp.n0, scale = lp.scale, bins = Array(lp.bins), vals = Array(lp.vals),
+        gids = d.gids, owned_cols = d.owned_cols, n0 = d.n0, is_root = d.is_root,
+        # dense first layer + global permutation live on root only (keeps non-root slabs O(local)).
+        dense_coords = d.is_root ? Array(d.dense_prob.coords) : nothing,
+        indices = d.is_root ? d.indices : nothing)
+    open(io -> serialize(io, payload), joinpath(dir, "part_$(rank).jls"), "w")
+    MPI.Barrier(d.comm)
+    return dir
+end
+
+function load_graph(dir::AbstractString, comm::MPI.Comm)
+    rank = MPI.Comm_rank(comm)
+    p = open(deserialize, joinpath(dir, "part_$(rank).jls"))
+    lp = GraphGPProblem(p.coords, p.neighbors, p.offsets, p.local_n0, p.scale, p.bins, p.vals)
+    dense_prob = p.is_root ?
+        GraphGPProblem(p.dense_coords, p.neighbors[:, 1:0], [p.n0], p.n0, p.scale, p.bins, p.vals) :
+        nothing
+    return PartitionedGraphGPProblem(lp, dense_prob, comm, p.n0, p.gids, p.owned_cols,
+        p.is_root, p.indices)
 end
 
 end # module

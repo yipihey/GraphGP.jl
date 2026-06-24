@@ -42,6 +42,13 @@ ld = generate_logdet(dprob)
 ld2, g = generate_logdet_and_grad_vals(dprob)
 loss, ginv = generate_inv_loss_grad_vals(dprob, data_tree)
 
+# Checkpoint roundtrip: save each rank's slab, reload (each rank reads ONLY its own), refit.
+ckpt = joinpath(tempdir(), "graphgp_ckpt_$(N)_$(nranks)")
+save_graph(ckpt, dprob)
+dprob_re = load_graph(ckpt, comm)
+ld_reload = generate_logdet(dprob_re)
+ld_reload_err = abs(ld_reload - ld_serial) / abs(ld_serial)
+
 # Memory model: max over ranks of (local coord columns) / N — should be « 1 for nranks > 1.
 local_cols = length(dprob.gids)
 max_cols = MPI.Allreduce(local_cols, MPI.MAX, comm)
@@ -62,8 +69,9 @@ if rank == 0
     @printf("  inv-grad_vals  norm-relerr=%.2e\n", ginv_err)
     @printf("  coords held:   max local cols=%d / N=%d  (%.1f%% of full)  Σowned=%d (==M=%d: %s)\n",
         max_cols, N, 100 * max_cols / N, sum_owned, N - n0, sum_owned == N - n0 ? "yes" : "no")
+    @printf("  checkpoint:    save→load logdet relerr=%.2e\n", ld_reload_err)
     ok = ld_err < 1e-9 && g_err < 1e-8 && loss_err < 1e-6 && ginv_err < 1e-6 &&
-         sum_owned == N - n0 && ld2 == ld
+         sum_owned == N - n0 && ld2 == ld && ld_reload_err < 1e-9
     println(ok ? "  PASS" : "  FAIL")
 end
 

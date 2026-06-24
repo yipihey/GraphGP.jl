@@ -87,6 +87,23 @@ Foundation for scheme B (partitioned coords, 10B+). Requires `using MPI`.
 """
 distributed_quantize(args...; kwargs...) = _mpi_required("distributed_quantize")
 
+"""
+    save_graph(dir, dprob)
+
+Parallel checkpoint of a distributed graph: each rank writes ONLY its own slab to
+`dir/part_<rank>.jls`. Pairs with [`load_graph`](@ref) so a once-built graph is reloaded without
+any rank materialising the full graph. Requires `using MPI`.
+"""
+save_graph(args...; kwargs...) = _mpi_required("save_graph")
+
+"""
+    load_graph(dir, comm) -> PartitionedGraphGPProblem
+
+Reload a [`save_graph`](@ref) checkpoint: each rank reads ONLY `dir/part_<rank>.jls` (no
+full-graph replication), reconstructing its `PartitionedGraphGPProblem`. Requires `using MPI`.
+"""
+load_graph(args...; kwargs...) = _mpi_required("load_graph")
+
 # --- internal reduction shims (implemented in the MPI extension) ---
 # `_dist_allreduce_sum(x::Float64, comm) -> Float64`  : sum-allreduce of a scalar.
 # `_dist_allreduce_sum!(v::Vector{Float64}, comm)`     : in-place sum-allreduce of a vector
@@ -385,11 +402,13 @@ function _scheme_b_local(coords::AbstractMatrix, neighbors::AbstractMatrix, n0::
     @inbounds for (p, g) in enumerate(gids)
         gidmap[g] = p
     end
-    local_nb = Matrix{Int}(undef, K, m_loc)
+    # Local neighbor indices fit Int32 (a rank holds < 2^31 coord columns), so store the dominant
+    # array as Int32 — ~35% smaller than the global Int64 `neighbors` (the scheme-B index win).
+    local_nb = Matrix{Int32}(undef, K, m_loc)
     @inbounds for j in 1:m_loc
         c = owned_cols[j]
         for i in 1:K
-            local_nb[i, j] = gidmap[Int(neighbors[i, c])]
+            local_nb[i, j] = Int32(gidmap[Int(neighbors[i, c])])
         end
     end
     local_coords = coords[:, gids]

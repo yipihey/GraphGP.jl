@@ -51,5 +51,6 @@ export refine_inv_loss_grad_points, generate_inv_loss_grad_points
 # Phase 11: distributed (multi-node / multi-GPU) — methods light up with `using MPI`
 export DistributedGraphGPProblem, distribute, distributed_build_graph, distributed_quantize
 export PartitionedGraphGPProblem   # scheme B: partitioned coords + halo
+export save_graph, load_graph      # parallel checkpoint of a distributed graph
 
 end # module
