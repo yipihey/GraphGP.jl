@@ -127,7 +127,6 @@ function refine!(values, prob::GraphGPProblem{T}, xi;
             refine_meanvec_std_kernel_aniso!(backend)(mean_vec, std, prob.coords, prob.neighbors,
                 prob.n0, prob.scale, cov.spatial_bins, cov.z_bins, cov.grid, T(cov.alpha),
                 Val(K), Val(D); ndrange = M, workgroupsize = wgs)
-            KernelAbstractions.synchronize(backend)
         end
     elseif cpu
         _native_refine_meanvec_std!(mean_vec, std, prob, Val(K), Val(D))
@@ -135,9 +134,12 @@ function refine!(values, prob::GraphGPProblem{T}, xi;
         refine_meanvec_std_kernel!(backend)(mean_vec, std, prob.coords, prob.neighbors, prob.n0,
             prob.scale, prob.bins, prob.vals, nbins(prob), Val(K), Val(D);
             ndrange = M, workgroupsize = wgs)
-        KernelAbstractions.synchronize(backend)
     end
 
+    # Sequential sweep over depth batches. On the GPU these launches share one stream, so batch
+    # b+1 already waits for batch b (and for the mean/std kernel above) by stream ordering — a
+    # per-batch host `synchronize` only adds a CPU↔GPU round-trip per batch (the bottleneck for
+    # the full `generate` forward). Launch all batches back-to-back; synchronize once at the end.
     apply = cpu ? nothing : refine_apply_kernel!(backend)
     offs = prob.offsets                      # 0-based exclusive batch ends; offs[1] == n0
     for b in 2:length(offs)
@@ -150,9 +152,9 @@ function refine!(values, prob::GraphGPProblem{T}, xi;
         else
             apply(values, mean_vec, std, prob.neighbors, xi, prob.n0, m_lo, Val(K);
                 ndrange = len, workgroupsize = wgs)
-            KernelAbstractions.synchronize(backend)
         end
     end
+    cpu || KernelAbstractions.synchronize(backend)
     return values
 end
 
