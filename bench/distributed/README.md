@@ -1,15 +1,29 @@
-# Distributed GraphGP.jl (MPI) — Phase 1
+# Distributed GraphGP.jl (MPI) — Phases 1–4
 
-Distributed evaluation of the **log-likelihood + covariance-table gradient** — the GP
-hyperparameter-fitting inner loop — across many ranks/GPUs. It is a thin layer over the existing
-kernels: partition the refined points, run the unchanged per-point drivers on each rank's slice,
-then one `MPI.Allreduce` (a Float64 scalar + an `nbins` histogram). See `../../docs/` and the
-plan for the full design; forward sampling and distributed graph construction are later phases.
+Distribute the GraphGP pipeline across many ranks/GPUs. The layer is thin: it dispatches on a
+`DistributedGraphGPProblem` wrapper and reuses the existing per-point kernels, adding only a
+partition + `MPI` reduction layer (MPI is a weakdep/extension; `using GraphGP` pulls no MPI).
+All reductions accumulate in Float64, so results are **bit-identical across rank counts**.
+
+| phase | capability | API |
+| --- | --- | --- |
+| 1 | log-likelihood + cov-table gradient (fitting) | `generate_logdet`, `generate_logdet_grad_vals`, `generate_logdet_and_grad_vals` on a `DistributedGraphGPProblem` |
+| 2 | inverse: loss gradient + `refine_inv` | `generate_inv_loss_grad_vals(dprob, data)`, `refine_inv(dprob, data)` |
+| 3 | field generation | 3a realizations (replicate graph, per-rank `generate`); 3b single field `generate(dprob, xi)` |
+| 4 | graph construction | `distributed_build_graph(points, comm, n0, k, bins, vals)` (replicated tree + partitioned query, tree order → fitting); `distributed_quantize(points_local, comm)` (global lattice via Allreduce, scheme-B foundation) |
+
+`distribute(prob, comm)` wraps an existing problem (partition `neighbors`, replicate `coords`);
+`distributed_build_graph` builds the partitioned graph directly without ever materialising the
+full `neighbors` on one rank. The build is **tree order**, which fits identically (the Vecchia
+logdet is invariant to the depth reorder) but is not depth-batched for forward `generate` — use
+`build_graph_ka` for generation, or a distributed depth-sort (the remaining scheme-B piece).
 
 ## What's here
 
 - `spike_allreduce.jl` — Phase 0 plumbing gate: MPI init, one-rank-per-GPU binding, host +
   device `Allreduce` (CUDA-aware if available, else host-staged).
+- `test_distributed_inv.jl` (Phase 2), `test_distributed_gen.jl` (Phase 3),
+  `test_distributed_build.jl` (Phase 4) — correctness vs serial, rank-invariant.
 - `test_distributed.jl` — correctness: distributed `generate_logdet` / `generate_logdet_grad_vals`
   must reproduce the serial result and be invariant to the rank count. `[N] [K] [cpu|gpu]`.
 - `bench_distributed.jl` — strong-scaling timing of the fused `generate_logdet_and_grad_vals`.

@@ -55,6 +55,27 @@ rank binds to its node-local GPU first. See `ext/GraphGPMPIExt.jl`.
 """
 function distribute end
 
+"""
+    distributed_build_graph(points, comm, n0, k, bins, vals; backend, lattice_bits) -> DistributedGraphGPProblem
+
+Build the graph distributed for FITTING (Phase 4, scheme A). Points are replicated; each rank
+builds the k-d tree and queries only its slice of refined points (the build's bottleneck), so the
+full `neighbors` is never materialised on any one rank. The result is in tree order — valid for
+`generate_logdet` / inverse-loss fitting (the Vecchia logdet is invariant to the depth reorder),
+but NOT for forward `generate` (which needs depth batches; build that with `build_graph_ka` or a
+later distributed depth-sort). Requires `using MPI`.
+"""
+function distributed_build_graph end
+
+"""
+    distributed_quantize(points_local, comm; bits = 21) -> (coords_local, origin, scale)
+
+Quantise spatially-partitioned points onto a globally-consistent integer lattice: the bounding
+box is reduced across ranks (`Allreduce` min/max), then each rank quantises its local points.
+Foundation for scheme B (partitioned coords, 10B+). Requires `using MPI`.
+"""
+function distributed_quantize end
+
 # --- internal reduction shims (implemented in the MPI extension) ---
 # `_dist_allreduce_sum(x::Float64, comm) -> Float64`  : sum-allreduce of a scalar.
 # `_dist_allreduce_sum!(v::Vector{Float64}, comm)`     : in-place sum-allreduce of a vector
@@ -64,6 +85,10 @@ function distribute end
 function _dist_allreduce_sum end
 function _dist_allreduce_sum! end
 function _dist_allgather_columns end
+# `_dist_allreduce_min!(v)`, `_dist_allreduce_max!(v)` : in-place min/max-allreduce (for the
+#   global bounding box in distributed_quantize).
+function _dist_allreduce_min! end
+function _dist_allreduce_max! end
 
 # --- distributed log-likelihood + gradient (these reuse the existing local drivers) ---
 
