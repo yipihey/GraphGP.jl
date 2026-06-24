@@ -1,106 +1,161 @@
 # GraphGP.jl
 
-A standalone Julia rewrite of
-[graphgp](https://github.com/yipihey/graphgp) (scalable Gaussian processes via a Vecchia /
-nearest-neighbor-graph approximation), using
-[KernelAbstractions.jl](https://github.com/JuliaGPU/KernelAbstractions.jl) for
-backend-agnostic CPU + GPU kernels, hand-written analytic adjoints, and
-[ChainRulesCore](https://github.com/JuliaDiff/ChainRulesCore.jl) for composable
-differentiability.
+[![CI](https://github.com/yipihey/GraphGP.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/yipihey/GraphGP.jl/actions/workflows/CI.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-The package implements the **entire pipeline in Julia** — k-d tree build, neighbor query,
-depth ordering, and the hot per-point inner loop (assemble each `(k+1)×(k+1)` covariance on the
-fly, factorize it, emit the per-point scalar) — with no Python/JAX dependency. The inner loop
-dominates runtime when the number of refined points `M = N − n0` reaches the billions.
+Scalable Gaussian processes via a Vecchia / nearest-neighbor-graph approximation — a standalone
+Julia rewrite of [graphgp](https://github.com/yipihey/graphgp) (JAX). One fused per-point kernel
+runs on **CPU and GPU** from a single code path ([KernelAbstractions.jl](https://github.com/JuliaGPU/KernelAbstractions.jl)),
+the full pipeline (k-d tree → neighbor query → depth ordering → generation) is **pure Julia with
+no Python/JAX/C++ dependency**, and every step is **differentiable** through hand-written analytic
+adjoints exposed as [ChainRules](https://github.com/JuliaDiff/ChainRulesCore.jl) `rrule`s.
 
-## Design choices
+The `(M, k+1, k+1)` covariance tensor is never materialized — each `(k+1)×(k+1)` block is built,
+factorized, and consumed in registers — so the method scales to billions of points where the
+materializing JAX path OOMs.
 
-- **f32 by default.** All real arithmetic is `Float32`; a `Float64` path exists only as a
-  debugging oracle.
-- **Integer lattice coordinates.** Points live on a 21-bit-per-axis (`UInt32`) Morton-friendly
-  lattice. Coordinate differences are exact integer subtractions; squared distances accumulate
-  in `Int64` and are cast to `Float32` only at the `sqrt` → kernel-lookup step.
-- **One workitem per point.** With `k ≈ 10` the per-point matrix is ~`11×11`, kept in private
-  memory; the full `(M, k+1, k+1)` tensor is never materialized (the memory win over JAX).
-- **Backend-agnostic, CUDA-free core.** The package has no hard CUDA dependency; GPU support is
-  selected automatically from `CuArray` inputs (KernelAbstractions), with the few GPU-specific
-  primitives (`sortperm`/`sort!` in the graph build) provided by a `CUDA` package extension.
+## 📊 Benchmarks & comparison
 
-## Implemented
+**Full numbers, methodology, and correctness cross-checks:**
+[**`docs/benchmarks.md`**](docs/benchmarks.md) · [**`docs/comparison_with_jax.md`**](docs/comparison_with_jax.md)
 
-| Routine | Status |
+Headline, on one **identical** graph, RTX A6000, Float32 (lower is better):
+
+| 1 M points, k=8 | GraphGP.jl | graphgp CUDA ext | pure JAX |
+| --- | --- | --- | --- |
+| forward `generate` | **6.2 ms** | 13.7 ms | OOM-prone |
+| ∂/∂xi | **6.5 ms** | 15.7 ms | autodiff (slow) |
+| ∂/∂cov_vals | **41 ms** | 84 ms | autodiff (slow) |
+
+- **Same answer.** Reproduces the JAX reference element-wise: ~1e-13 (Float64), ~1e-5 (Float32 GPU).
+- **`build_graph` is byte-identical to Python's** `gp.build_graph` (permutation, neighbors, offsets).
+- **Faster than the hand-written CUDA extension at 1 M** on all three (2–2.4×); competitive at 10 M
+  (wins ∂/∂xi). The CUDA extension has **no autodiff**; GraphGP.jl differentiates on CPU *and* GPU.
+- **CPU:** the same fused kernel does ~20 M points/s multithreaded — the CUDA extension is GPU-only.
+
+## Install
+
+```julia
+using Pkg
+Pkg.add(url="https://github.com/yipihey/GraphGP.jl")
+```
+
+## Quickstart
+
+```julia
+using GraphGP, Random
+
+N, D, n0, k = 10_000, 2, 100, 10
+points = randn(MersenneTwister(99), N, D)                       # (N, D)
+
+# Discretized covariance table (RBF), then build the dependency graph.
+bins, vals = rbf_kernel(1.0, 0.3, 1e-4, 10.0, 1000; jitter = 1e-5)   # variance, scale, r_min, r_max, n_bins
+prob = build_graph(points, n0, k, bins, vals)                  # k-d tree + k-NN + depth order, in Julia
+
+xi = randn(MersenneTwister(7), N)                              # unit-normal parameters
+values = generate(prob, xi)                                    # draw a GP realization
+@assert !any(isnan, values)
+
+xi_back = generate_inv(prob, values)                           # exact inverse
+logdet  = generate_logdet(prob)                                # log-determinant of the implied covariance
+```
+
+## Coming from Python `graphgp`?
+
+The API mirrors the JAX package, with one deliberate difference: **the covariance table is folded
+into the graph object** (`build_graph`), so `generate`/`generate_inv`/`generate_logdet` don't take
+a separate `covariance` argument.
+
+| Python `graphgp` | GraphGP.jl |
 | --- | --- |
-| `build_tree` / `query_preceding_neighbors` / `compute_depths` / `order_by_depth` / `build_graph` | ✅ graph construction in Julia (CPU; GPU build in progress) |
-| `check_graph` | ✅ graph-invariant validator |
-| `generate` / `generate_inv` / `generate_logdet` (+ `*_dense`) | ✅ forward / inverse / logdet (dense first layer + Vecchia refine) |
-| `refine` / `refine!`, `refine_inv` / `refine_inv!`, `refine_logdet` | ✅ per-point kernels (CPU + GPU) |
-| `compute_cov_matrix` | ✅ dense reference covariance builder |
-| `refine_logdet_grad_vals`, `refine_inv_loss_grad_vals` (+ `generate_*`) | ✅ hand-written reverse-mode adjoints (CPU threaded / GPU atomic) |
+| `gp.extras.rbf_kernel(variance=, scale=, r_min=, r_max=, n_bins=, jitter=)` | `rbf_kernel(variance, scale, r_min, r_max, n_bins; jitter=)` |
+| `graph = gp.build_graph(points, n0=, k=)` | `prob = build_graph(points, n0, k, bins, vals)` |
+| `gp.generate(graph, cov, xi)` | `generate(prob, xi)` |
+| `gp.generate_inv(graph, cov, values)` | `generate_inv(prob, values)` |
+| `gp.generate_logdet(graph, cov)` | `generate_logdet(prob)` |
+| `gp.check_graph(graph)` | `check_graph(prob)` |
+| `gp.build_graph(..., cuda=True)` (GPU) | pass `CuArray` points, or `to_backend(prob, CUDABackend())` |
+| *(no gradient on the CUDA extension)* | `refine_logdet_grad_vals`, `generate_grad_xi`, `generate_grad_vals`, `hyperparam_grad`, … |
 
-The hand-written logdet gradient is cross-checked against an Enzyme-through-KA reference
-(`refine_logdet_grad_vals_enzyme`) and the JAX f64 oracle.
+The same script, side by side:
+
+```python
+# Python (JAX)
+import graphgp as gp
+graph = gp.build_graph(points, n0=100, k=10)
+cov   = gp.extras.rbf_kernel(variance=1.0, scale=0.3, r_min=1e-4, r_max=10.0, n_bins=1000, jitter=1e-5)
+values = gp.generate(graph, cov, xi)
+```
+
+```julia
+# Julia (GraphGP.jl)
+using GraphGP
+bins, vals = rbf_kernel(1.0, 0.3, 1e-4, 10.0, 1000; jitter = 1e-5)
+prob   = build_graph(points, 100, 10, bins, vals)
+values = generate(prob, xi)
+```
+
+Conventions: `points` is `(N, D)`; internally the graph stores `coords` as `(D, N)` `UInt32`
+(a 21-bit-per-axis integer lattice) and `neighbors` as `(k, M)` 1-based indices. A `Matern` kernel
+(`matern_kernel`) and an anisotropic kernel `K(Δspatial, Δz)` (`build_anisotropic_covariance`) are
+also provided.
+
+## What it adds over the JAX stack
+
+- **One fused kernel, two backends.** `src/kernels.jl` (one workitem per refined point; assemble
+  the `(k+1)²` block, factorize in registers, never materialize the batch) + `src/linalg.jl`
+  (per-point Cholesky / solve). The CPU backend uses a native threaded path (`src/cpu_native.jl`).
+- **Analytic gradients the CUDA extension lacks**, on CPU **and** GPU: ∂/∂`cov_vals`,
+  ∂/∂hyperparameters (via `hyperparam_grad`), ∂/∂`xi`, and ∂/∂points. `src/chainrules.jl` exposes
+  them as ChainRules `rrule`s so Zygote composes an arbitrary scalar loss.
+- **Full graph construction in Julia** — `build_graph` reproduces `gp.build_graph` byte-for-byte;
+  `build_graph_ka` runs tree → k-NN → depths → reorder → quantize on the device.
+- **Distributed (multi-node / multi-GPU)** — a `using MPI` extension lights up `distribute` and a
+  distributed log-likelihood + gradient for fitting at scale (see `bench/distributed/`).
 
 ## Differentiability
 
-Gradients are provided by hand-written analytic adjoints (not generic autodiff), exposed as
-`ChainRulesCore.rrule`s so any reverse-mode AD framework (e.g. Zygote) can compose them for an
-**arbitrary scalar loss**:
+Gradients are hand-written analytic adjoints (not generic autodiff), exposed as
+`ChainRulesCore.rrule`s so any reverse-mode AD (e.g. Zygote) composes them for an arbitrary scalar
+loss:
 
-- **w.r.t. the discretized covariance `cov_vals`** — for `logdet` and the inverse quadratic
-  form `0.5‖xi‖²`; chains to kernel hyperparameters via `hyperparam_grad`.
-- **w.r.t. the white-noise parameters `xi`** — `generate`/`refine` are linear in `xi`, so the
-  VJP is exact and cheap.
-- **w.r.t. point positions** — supported through a continuous (dequantized) coordinate path;
-  the integer lattice is treated straight-through (gradients are w.r.t. the dequantized
-  positions, consistent with the forward value).
-
-The fast forward path is unchanged (integer lattice); the point-gradient path uses float
-positions only when point derivatives are requested.
-
-## Benchmarks (CPU)
-
-4-core CPU, `N = 200_000`, `k = 10`, `d = 3`, f32 (median of repeated runs):
-
-| Op | GraphGP.jl (4 threads) | JAX (CPU, jit) | speedup |
-| --- | --- | --- | --- |
-| `refine_logdet` | 0.44 s | 2.24 s | **5.1×** |
-| `refine_inv` | 0.66 s | 2.54 s | **3.9×** |
-| `refine_logdet_grad_vals` | 0.48 s | 3.02 s | **6.3×** |
-
-The kernels never materialize the `(M, k+1, k+1)` covariance tensor. The reverse pass uses a
-hand-written analytic Cholesky pullback; on CPU it accumulates into per-task private
-histograms (no atomics), on GPU it scatters with atomics (the one-workitem-per-point design
-targets CUDA.jl — GPU validation runs on hardware with a GPU, not available in CI here).
-
-Reproduce: `julia -t auto --project=. test/bench.jl 200000 10 3`
-and `python test/bench_jax.py 200000 10 3`.
-
-GPU benchmarks (GraphGP.jl vs JAX vs the custom `graphgp-cuda` reference, on an RTX A6000)
-live in [`test/GPU_BENCHMARK_RESULTS.md`](test/GPU_BENCHMARK_RESULTS.md); they run from the
-dedicated environment in `bench/` (`julia --project=bench …`) so the package
-itself stays CUDA-free.
-
-## Usage
+- **w.r.t. the discretized covariance `cov_vals`** — for `logdet` and the inverse quadratic form
+  `0.5‖xi‖²`; chains to kernel hyperparameters via `hyperparam_grad`.
+- **w.r.t. the white-noise `xi`** — `generate`/`refine` are linear in `xi`, so the VJP is exact.
+- **w.r.t. point positions** — through a continuous (dequantized) coordinate path.
 
 ```julia
-using GraphGP
-prob = GraphGPProblem(coords, neighbors, offsets, n0, scale, bins, vals)
-ld  = refine_logdet(prob)        # Σ log(std)
-xi  = refine_inv(prob, values)   # recover unit-normal parameters
+g_vals  = refine_logdet_grad_vals(prob)                        # ∂ logdet / ∂ cov_vals
+g_hyper = hyperparam_grad(g_vals, (v, s) -> rbf_kernel(v, s, 1e-4, 10.0, 1000; jitter = 1e-3),
+                          [1.0, 0.3])                          # → ∂ logdet / ∂ [variance, scale]
 ```
 
-`coords` is `(D, N)` `UInt32`, `neighbors` is `(K, M)` 1-based integer indices, `bins`/`vals`
-are the discretized covariance. The CPU backend is the default; a CUDA array input selects the
-GPU backend automatically (KernelAbstractions).
+See [`examples/parity_and_autodiff.jl`](examples/parity_and_autodiff.jl) for an end-to-end tour.
 
-## Validation & benchmarks
+## GPU
 
-Reference inputs/outputs (and gradients) are dumped from the JAX implementation:
+Pass `CuArray` inputs (and `CUDA` in your environment) and the same calls run on the device, or
+move a built problem with `to_backend(prob, CUDABackend())`. The package has no hard CUDA
+dependency; GPU-specific primitives are provided by a `CUDA` package extension.
+
+## Documentation
+
+- [`docs/benchmarks.md`](docs/benchmarks.md) — performance, memory, correctness vs the CUDA extension.
+- [`docs/comparison_with_jax.md`](docs/comparison_with_jax.md) — design + throughput vs JAX, annotated.
+- [`FEATURE_COVERAGE.md`](FEATURE_COVERAGE.md) — function-by-function parity audit vs Python `graphgp`.
+- [`bench/compare/`](bench/compare/) — the apples-to-apples comparison harness (one shared graph).
+
+## Development
 
 ```bash
-python test/dump_reference.py        # writes test/reference/*.npz
-julia --project=. -e 'using Pkg; Pkg.test()'
+julia --project=. -e 'using Pkg; Pkg.test()'        # CPU suite (+ GPU testset auto-runs if CUDA is present)
 ```
 
-Tests assert the f32 kernels track JAX f32 closely and stay within a bounded distance of the
-f64 oracle, and that the f64 Julia path reproduces the JAX f64 oracle tightly.
+Tests assert the Float32 kernels track JAX Float32 closely, stay within a bounded distance of the
+Float64 oracle, and that the Float64 Julia path reproduces the JAX Float64 oracle tightly.
+Reference fixtures can be regenerated from the Python package with `python test/dump_reference.py`.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Derived from [graphgp](https://github.com/yipihey/graphgp)
+by Benjamin Dodge and Philipp Frank.
