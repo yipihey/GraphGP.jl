@@ -29,7 +29,19 @@ n0 = Int(d["n0"]); scale = T(d["scale"])
 bins = T.(d["cov_bins32"]); vals = T.(d["cov_vals32"])
 indices = haskey(d, "indices") ? (Int.(vec(d["indices"])) .+ 1) : nothing   # 0-based -> 1-based
 
-prob = GraphGPProblem(coords, neighbors, offsets, n0, scale, bins, vals, indices)
+# Anisotropic kernel K(Δspatial, Δz): the dumped grid already carries the jitter (applied in
+# Python build_anisotropic_covariance), so construct with jitter=0. NPZ preserves the (n_s,n_z)
+# logical shape; parity is checked against the fork's aniso.py.
+prob = if haskey(d, "aniso_grid")
+    sb = T.(vec(d["aniso_spatial_bins"]))
+    zb = T.(vec(d["aniso_z_bins"]))
+    grid = T.(d["aniso_grid"])                         # (n_s, n_z)
+    alpha = T(d["aniso_alpha"][])
+    cov = build_anisotropic_covariance(sb, zb, grid, alpha; jitter = 0)
+    GraphGPProblem(coords, neighbors, offsets, n0, scale, cov, indices)
+else
+    GraphGPProblem(coords, neighbors, offsets, n0, scale, bins, vals, indices)
+end
 if usegpu
     prob = to_backend(prob, CUDABackend())
 end
