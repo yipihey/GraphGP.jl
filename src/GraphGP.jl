@@ -21,6 +21,7 @@ include("tree_gpu.jl")
 include("graph_build.jl")
 include("chainrules.jl")
 include("grad_generate_vals.jl")
+include("distributed.jl")
 
 export GraphGPProblem, npoints, nneighbors, nrefined, ndims_space, nbins, to_backend
 export cov_lookup
@@ -47,5 +48,7 @@ export generate_grad_vals, generate_of_vals
 export logdet_of_points, inv_quadratic_loss_of_points
 export refine_logdet_grad_points, generate_logdet_grad_points
 export refine_inv_loss_grad_points, generate_inv_loss_grad_points
+# Phase 11: distributed (multi-node / multi-GPU) — methods light up with `using MPI`
+export DistributedGraphGPProblem, distribute, distributed_build_graph, distributed_quantize
 
 end # module

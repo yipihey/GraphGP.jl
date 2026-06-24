@@ -102,9 +102,9 @@ end
 # nearest preceding (position < m) points and writes their 1-based tree indices, ascending
 # by distance, into neighbors[:, t].
 @kernel function _query_kernel!(neighbors, @Const(rec), @Const(spts),
-        n0, max_node, ::Val{K}, ::Val{D}) where {K, D}
+        n0, m_base, max_node, ::Val{K}, ::Val{D}) where {K, D}
     t = @index(Global)
-    m = n0 + t
+    m = n0 + m_base + t            # global query point; `m_base` offsets a distributed slice
     bd = @private Float32 (K,)     # k-best squared distances
     bi = @private Int (K,)         # k-best point indices (1-based)
     qp = @private Float32 (D,)     # query coordinates, cached once
@@ -247,9 +247,13 @@ approximation). Runs on CPU or GPU depending on the array backend (pass `CuArray
 function query_preceding_neighbors_ka(spts::AbstractMatrix{Float64},
         seg_lo::AbstractVector{<:Integer}, seg_hi::AbstractVector{<:Integer},
         split_dim::AbstractVector{<:Integer}, n0::Int, k::Int;
-        backend = get_backend(spts))
+        backend = get_backend(spts), mrange::Union{Nothing, UnitRange{Int}} = nothing)
     D, N = size(spts)
-    M = N - n0
+    # `mrange` selects a contiguous slice of refined points (1-based, within 1:N-n0) to query —
+    # used to distribute the query across ranks. Defaults to all refined points.
+    rng = mrange === nothing ? (1:(N - n0)) : mrange
+    m_base = first(rng) - 1
+    M = length(rng)
     max_node = length(seg_lo)
     # One contiguous Int32 record per node (RW = 4 + 2D): positions exact, geometry Float32 via
     # bit-reinterpret → a single coalesced fetch per node with fast f32 math.
@@ -270,7 +274,7 @@ function query_preceding_neighbors_ka(spts::AbstractMatrix{Float64},
         synchronize(backend)
     end
     neighbors = ka_zeros(backend, Int, k, M)
-    _query_kernel!(backend)(neighbors, rec, spts32, n0, max_node, Val(k), Val(D);
+    _query_kernel!(backend)(neighbors, rec, spts32, n0, m_base, max_node, Val(k), Val(D);
         ndrange = M, workgroupsize = _wgsize(backend))
     synchronize(backend)
     return neighbors

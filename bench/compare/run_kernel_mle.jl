@@ -2,7 +2,7 @@
 # Julia process (the optimization loop never crosses the subprocess boundary, so no per-eval cold
 # start). This is the showcase of GraphGP.jl's analytic gradients — the capability the CUDA ext lacks.
 #
-#   julia -t N --project=bench run_kernel_mle.jl <in.npz> <out.npz> <fit|gradcheck>
+#   julia -t N --project=julia/GraphGP/bench run_kernel_mle.jl <in.npz> <out.npz> <fit|gradcheck>
 #
 # Objective: negative log marginal likelihood (drop the ½N·log2π constant)
 #   f(θ) = ½ logdet K(θ) + ½ yᵀ K(θ)⁻¹ y

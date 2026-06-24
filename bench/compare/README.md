@@ -57,6 +57,29 @@ capped to the core budget, so the CPU comparison is fair under machine load.
 - `run_julia.jl <graph> <correctness|timing> <cpu|gpu> <outdir>` — one GraphGP.jl path.
 - `report.py <outdir>` — aggregate the `*.npz` outputs + `timings.jsonl` into Markdown.
 
+## Real ECHOES graphs
+
+`dump_graph.py` builds a *synthetic* point cloud. To benchmark the graphs the ECHOES field
+pipeline actually builds, use `dump_graph_echoes.py` (same output schema **plus** the
+`indices` permutation, so it also feeds `run_graphgp.jl`):
+
+```bash
+# survey ∈ {boss, local}; reads ~/Projects/ECHOES/data (override with ECHOES_ROOT)
+python dump_graph_echoes.py boss 2400000 results/boss_2400000/graph.npz 30
+```
+
+- `boss`  — CMASS-South *randoms* (the candidate set the field is generated on), SGC footprint
+  + CMASS z-cut, embedded as `(n̂, α·z)` (4-D), exactly as
+  `twopt_density/observed_ls.generate_catalogs_from_kernel`.
+- `local` — 2M++ comoving xyz (3-D); real galaxies at catalog size, uniform-in-volume
+  candidates (ZoA gap) above it.
+
+`run_echoes_bench.sh "boss:120000 boss:560000 boss:2400000 local:70000 local:1400000"` sweeps N,
+runs every path per point (each in `results/<survey>_<N>/`), and `report_sweep.py` collates the
+three real-graph tables: correctness vs N, throughput vs N, and the pure-JAX-GPU **OOM** matrix
+(the no-materialization headline). The build uses the ECHOES venv (`~/.venv/k3d`, has `echoes`
++ `graphgp`); GPU paths use the `.venv-gpu` (has `graphgp_cuda`).
+
 ## Notes on fairness
 
 - **Same graph, same precision tier.** Correctness is checked in Float64 (independent of f32
