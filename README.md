@@ -170,7 +170,10 @@ these into a `jax.custom_vjp` when you need GraphGP inside a differentiated JAX 
 - **Full graph construction in Julia** — `build_graph` reproduces `gp.build_graph` byte-for-byte;
   `build_graph_ka` runs tree → k-NN → depths → reorder → quantize on the device.
 - **Distributed (multi-node / multi-GPU)** — a `using MPI` extension lights up `distribute` and a
-  distributed log-likelihood + gradient for fitting at scale (see `bench/distributed/`).
+  distributed log-likelihood + gradient for fitting at scale. Two partition schemes:
+  `:replicate_coords` (scheme A) and `:partition_coords` (scheme B — per-rank coords + ghost halo,
+  for the billion-to-100-billion regime). See [`docs/scaling-100B.md`](docs/scaling-100B.md) and
+  `bench/distributed/`.
 
 ## Differentiability
 

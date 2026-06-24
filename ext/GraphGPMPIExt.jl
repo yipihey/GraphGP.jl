@@ -16,7 +16,8 @@ import GraphGP: distribute, _dist_allreduce_sum, _dist_allreduce_sum!, _dist_all
     _dist_allreduce_min!, _dist_allreduce_max!, distributed_build_graph, distributed_quantize,
     DistributedGraphGPProblem, GraphGPProblem, nrefined,
     build_tree_ka, query_preceding_neighbors_ka, quantize_to_lattice, _move_to_backend,
-    KernelAbstractions
+    KernelAbstractions,
+    PartitionedGraphGPProblem, _scheme_b_local, _morton_key
 
 # Balanced contiguous split of 1:M across `nranks`: the first `rem` ranks get one extra column.
 # Returns (m_lo, m_hi) 1-based inclusive; m_lo > m_hi means this rank owns no columns.
@@ -42,9 +43,9 @@ function _dense_only_prob(prob::GraphGPProblem)
 end
 
 function distribute(prob::GraphGPProblem, comm::MPI.Comm; scheme::Symbol = :replicate_coords)
+    scheme === :partition_coords && return _distribute_partition_coords(prob, comm)
     scheme === :replicate_coords ||
-        error("distribute: only scheme=:replicate_coords is implemented (Phase 1); " *
-              "spatial coords partitioning is Phase 4.")
+        error("distribute: scheme must be :replicate_coords or :partition_coords (got $scheme).")
     rank = MPI.Comm_rank(comm)
     nranks = MPI.Comm_size(comm)
     M = nrefined(prob)
@@ -62,6 +63,35 @@ function distribute(prob::GraphGPProblem, comm::MPI.Comm; scheme::Symbol = :repl
     dense_prob = is_root ? _dense_only_prob(prob) : nothing
     return DistributedGraphGPProblem(local_prob, dense_prob, comm, n0g, m_lo, m_hi, is_root,
         prob.indices, copy(prob.offsets))
+end
+
+# --- scheme B: partition coords + halo (each rank keeps only owned + ghost coords) ---
+#
+# Every rank computes the SAME spatial (Morton) order of the refined points and takes its balanced
+# contiguous chunk as `owned_cols` — so the partition is consistent with no communication. It then
+# builds a compacted local problem (`_scheme_b_local`) holding ONLY its owned points' coords plus
+# their neighbor halo. Like scheme A, the input `prob` is replicated, but the per-rank WORKING set
+# (`local_prob`) is small; the from-scratch no-replication build is `distributed_build_graph`.
+function _distribute_partition_coords(prob::GraphGPProblem, comm::MPI.Comm)
+    rank = MPI.Comm_rank(comm)
+    nranks = MPI.Comm_size(comm)
+    M = nrefined(prob)
+    n0 = prob.n0
+    coords_h = Array(prob.coords)                         # (D, N) host (for the Morton keys)
+    mbits = 21
+    keys = Vector{UInt128}(undef, M)
+    @inbounds for c in 1:M
+        keys[c] = _morton_key(view(coords_h, :, n0 + c), mbits)
+    end
+    order = sortperm(keys)                                # refined columns in spatial order
+    m_lo, m_hi = _balanced_range(M, rank, nranks)
+    owned_cols = m_hi >= m_lo ? sort!(order[m_lo:m_hi]) : Int[]
+    local_prob, gids = _scheme_b_local(prob.coords, prob.neighbors, n0, prob.scale,
+        prob.bins, prob.vals, owned_cols)
+    is_root = rank == 0
+    dense_prob = is_root ? _dense_only_prob(prob) : nothing
+    return PartitionedGraphGPProblem(local_prob, dense_prob, comm, n0, gids, owned_cols,
+        is_root, prob.indices)
 end
 
 # --- reduction shims (host Float64 payloads) ---

@@ -312,3 +312,202 @@ function generate(dprob::DistributedGraphGPProblem, xi::AbstractVector;
     end
     return values
 end
+
+# =====================================================================================
+# Scheme B — partitioned coords + halo (breaks the scheme-A coords-replication ceiling)
+# =====================================================================================
+#
+# Scheme A replicates `coords` on every rank (~1–3 B-point ceiling). Scheme B keeps on each rank
+# ONLY the coords it needs: its OWNED refined points plus the GHOST halo — the neighbor points of
+# those owned points that live on other ranks. With points in a spatial (Morton) order and
+# partitioned contiguously, the k-NN neighbors are overwhelmingly local, so the halo is small.
+#
+# The fitting log-likelihood (`logdet` + its hyperparameter gradient) is a SUM of independent
+# per-point terms, so it is invariant to how the refined points are partitioned. Scheme B builds,
+# per rank, a *compacted* `GraphGPProblem` (a context block of halo/dense points followed by the
+# owned refined self-points, with neighbors remapped to local indices) and then runs the EXACT
+# same local drivers + reduction as scheme A. See docs/scaling-100B.md.
+
+# Morton (Z-order) key of a D-dim lattice point (low `mbits` bits per axis interleaved). Gives a
+# spatial order so a contiguous partition of points has small neighbor halos. D≤4, mbits≤21 ⇒ ≤84
+# bits ⇒ fits UInt128.
+function _morton_key(coord, mbits::Int)
+    D = length(coord)
+    key = UInt128(0)
+    @inbounds for b in 0:(mbits - 1)
+        for d in 1:D
+            bit = (UInt128(coord[d]) >> b) & UInt128(1)
+            key |= bit << (b * D + (d - 1))
+        end
+    end
+    return key
+end
+
+"""
+    _scheme_b_local(coords, neighbors, n0, scale, bins, vals, owned_cols)
+        -> (local_prob, gids)
+
+Pure (MPI-free) scheme-B remap. From the GLOBAL graph (`coords` `(D,N)`, `neighbors` `(K,M)` 1-based
+global point indices, dense size `n0`) and the refined COLUMN indices `owned_cols ⊆ 1:M` this rank
+owns, build a compacted local `GraphGPProblem`:
+
+- local coords = `coords[:, gids]` with `gids = [context ; owned-self]`, where `context` is the set
+  of neighbor points that are not themselves owned-self (sorted ascending) and `owned-self` are the
+  owned refined points' own coords (in `owned_cols` order);
+- local `n0` = `length(context)`; the owned refined points occupy the columns after it;
+- local `neighbors` are remapped to indices into `gids` (so they resolve in the local coords).
+
+`gids` is returned so observation data can be gathered to local order (`data[gids]`). This is the
+only novel logic in scheme B; everything downstream reuses the existing per-point drivers.
+"""
+function _scheme_b_local(coords::AbstractMatrix, neighbors::AbstractMatrix, n0::Int,
+        scale, bins::AbstractVector, vals::AbstractVector, owned_cols::AbstractVector{<:Integer})
+    K = size(neighbors, 1)
+    m_loc = length(owned_cols)
+    self_gids = Vector{Int}(undef, m_loc)
+    @inbounds for j in 1:m_loc
+        self_gids[j] = n0 + owned_cols[j]
+    end
+    owned_set = Set(self_gids)
+    # Distinct neighbor points that are not owned-self → the context (halo + dense) block.
+    ctx_set = Set{Int}()
+    @inbounds for j in 1:m_loc
+        c = owned_cols[j]
+        for i in 1:K
+            g = Int(neighbors[i, c])
+            g in owned_set || push!(ctx_set, g)
+        end
+    end
+    context = sort!(collect(ctx_set))
+    ctx = length(context)
+    gids = vcat(context, self_gids)                       # local coord column → global point id
+    gidmap = Dict{Int, Int}()
+    @inbounds for (p, g) in enumerate(gids)
+        gidmap[g] = p
+    end
+    local_nb = Matrix{Int}(undef, K, m_loc)
+    @inbounds for j in 1:m_loc
+        c = owned_cols[j]
+        for i in 1:K
+            local_nb[i, j] = gidmap[Int(neighbors[i, c])]
+        end
+    end
+    local_coords = coords[:, gids]
+    # Keep neighbors on the same backend as coords (the GraphGPProblem invariant).
+    local_nb_b = _move_to_backend(local_nb, KernelAbstractions.get_backend(coords))
+    local_prob = GraphGPProblem(local_coords, local_nb_b, [ctx, ctx + m_loc], ctx,
+        eltype(vals)(scale), bins, vals)
+    return local_prob, gids
+end
+
+"""
+    PartitionedGraphGPProblem
+
+Scheme-B rank-local view: a compacted `local_prob` (context/halo block + owned refined points,
+neighbors remapped to local indices), the global point ids `gids` of its coord columns, the global
+`n0`, and — on the root only — a `dense_prob` for the global first layer. Construct with
+`distribute(prob, comm; scheme = :partition_coords)` (requires `using MPI`). Supports the FITTING
+methods (`generate_logdet`, its `vals` gradient, the fused form, and the inverse-quadratic-loss
+gradient) — all order-independent reductions, so the spatial partition is correctness-neutral.
+"""
+struct PartitionedGraphGPProblem{P <: GraphGPProblem, DP, C}
+    local_prob::P
+    dense_prob::DP                       # global dense first layer (root), else nothing
+    comm::C
+    n0::Int                              # GLOBAL dense first-layer size
+    gids::Vector{Int}                    # global point id of each local coord column
+    owned_cols::Vector{Int}              # global refined columns (1..M) this rank owns
+    is_root::Bool
+    indices::Union{Nothing, Vector{Int}} # global tree-order permutation (for data reordering)
+end
+
+nrefined_local(d::PartitionedGraphGPProblem) = length(d.owned_cols)
+KernelAbstractions.get_backend(d::PartitionedGraphGPProblem) =
+    KernelAbstractions.get_backend(d.local_prob)
+
+# Root-only dense first-layer logdet / vals-gradient, from the global first layer in dense_prob.
+_schemeB_dense_logdet(d::PartitionedGraphGPProblem) =
+    Float64(generate_dense_logdet(d.dense_prob.coords, d.dense_prob.scale,
+        d.dense_prob.bins, d.dense_prob.vals, d.n0))
+_schemeB_dense_grad_vals(d::PartitionedGraphGPProblem) =
+    Float64.(_dense_logdet_grad_vals(d.dense_prob))
+
+"""
+    generate_logdet(d::PartitionedGraphGPProblem; backend) -> Float64
+
+Scheme-B distributed `generate_logdet`: each rank sums `log(std)` over its owned refined points
+(resolved against its local coords + halo), the root adds the global dense first layer, then one
+sum-`Allreduce`. Identical result to the serial / scheme-A logdet, independent of rank count.
+"""
+function generate_logdet(d::PartitionedGraphGPProblem;
+        backend = KernelAbstractions.get_backend(d))
+    terms = refine_logdet_terms(d.local_prob; backend = backend)
+    local_sum = sum(Float64, Array(terms))
+    d.is_root && (local_sum += _schemeB_dense_logdet(d))
+    return _dist_allreduce_sum(local_sum, d.comm)
+end
+
+"""
+    generate_logdet_grad_vals(d::PartitionedGraphGPProblem; backend) -> Vector{Float64}
+
+Scheme-B gradient of `generate_logdet` w.r.t. `vals`: per-rank `nbins` histogram + root dense
+block + sum-`Allreduce`. Returns the global gradient on every rank, ready for `hyperparam_grad`.
+"""
+function generate_logdet_grad_vals(d::PartitionedGraphGPProblem;
+        backend = KernelAbstractions.get_backend(d))
+    dv = Float64.(Array(refine_logdet_grad_vals(d.local_prob; backend = backend)))
+    d.is_root && (dv .+= _schemeB_dense_grad_vals(d))
+    _dist_allreduce_sum!(dv, d.comm)
+    return dv
+end
+
+"""
+    generate_logdet_and_grad_vals(d::PartitionedGraphGPProblem; backend) -> (Float64, Vector{Float64})
+
+Fused scheme-B logdet + `vals` gradient: a single sum-`Allreduce` of `[logdet; d_vals]`.
+"""
+function generate_logdet_and_grad_vals(d::PartitionedGraphGPProblem;
+        backend = KernelAbstractions.get_backend(d))
+    terms = refine_logdet_terms(d.local_prob; backend = backend)
+    local_ld = sum(Float64, Array(terms))
+    dv = Float64.(Array(refine_logdet_grad_vals(d.local_prob; backend = backend)))
+    if d.is_root
+        local_ld += _schemeB_dense_logdet(d)
+        dv .+= _schemeB_dense_grad_vals(d)
+    end
+    packed = Vector{Float64}(undef, length(dv) + 1)
+    packed[1] = local_ld
+    @inbounds packed[2:end] .= dv
+    _dist_allreduce_sum!(packed, d.comm)
+    return packed[1], packed[2:end]
+end
+
+"""
+    generate_inv_loss_grad_vals(d::PartitionedGraphGPProblem, data_tree; backend) -> (Float64, Vector{Float64})
+
+Scheme-B gradient of `0.5‖generate_inv(data)‖²` w.r.t. `vals`. `data_tree` is the observation
+vector in global tree order (length N); each rank gathers `data_tree[gids]` for its local coords
+(at scale this is the data halo — the same `gids` as the coords halo). Returns the global
+`(loss, d_vals)` on every rank.
+"""
+function generate_inv_loss_grad_vals(d::PartitionedGraphGPProblem, data_tree::AbstractVector;
+        backend = KernelAbstractions.get_backend(d))
+    lp = d.local_prob
+    T = eltype(lp.vals)
+    data_local = _move_to_backend(T.(data_tree[d.gids]), backend)
+    ref_loss, g_ref = refine_inv_loss_grad_vals(lp, data_local; backend = backend)
+    local_loss = Float64(ref_loss)
+    dv = Float64.(Array(g_ref))
+    if d.is_root
+        dd = T.(@view data_tree[1:d.n0])
+        xi_dense = generate_dense_inv(d.dense_prob.coords, d.dense_prob.scale,
+            d.dense_prob.bins, d.dense_prob.vals, dd)
+        local_loss += sum(abs2, xi_dense) / 2
+        dv .+= Float64.(_dense_inv_loss_grad_vals(d.dense_prob, dd))
+    end
+    packed = Vector{Float64}(undef, length(dv) + 1)
+    packed[1] = local_loss
+    @inbounds packed[2:end] .= dv
+    _dist_allreduce_sum!(packed, d.comm)
+    return packed[1], packed[2:end]
+end

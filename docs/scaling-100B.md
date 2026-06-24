@@ -50,39 +50,49 @@ communicates:
 **Ceiling:** `coords` is *replicated*, so scheme A stops where 1.2 TB of coords no longer fits one
 GPU — roughly **1–3 B points**. 100B requires partitioning `coords` too.
 
-## 3. Scheme B — partition coords + halo ⬜
+## 3. Scheme B — partition coords + halo ✅ (fitting)
 
 Past the replication ceiling, points are **spatially domain-decomposed**: each rank owns a region
 plus a **ghost halo** of the neighbor points referenced from outside its region. Cosmological
 clustering keeps halos small (neighbors are overwhelmingly local). The lattice foundation
-(`distributed_quantize`, 🟡) already gives a globally consistent integer grid.
+(`distributed_quantize`) gives a globally consistent integer grid.
 
-### Proposed type and constructor
+**Implemented for the fitting pipeline** (`src/distributed.jl`, `ext/GraphGPMPIExt.jl`):
 
 ```julia
-# Extends the merged DistributedGraphGPProblem with the halo bookkeeping scheme B needs.
-struct PartitionedGraphGPProblem{P<:GraphGPProblem, C}
-    local_prob   :: P            # GraphGPProblem over [owned ∪ ghost] coords, local indices
-    comm         :: C            # MPI.Comm
-    n0           :: Int          # global dense first-layer size
-    owned        :: UnitRange{Int}   # this rank's global point ids (contiguous after the sort, §4)
-    # halo: ghost points pulled from neighbors, addressed by (owner_rank, owner_local_index)
-    ghost_owner  :: Vector{Int32}    # owner rank of each ghost slot
-    ghost_index  :: Vector{Int32}    # owner-local index of each ghost slot
-    recv_plan    :: HaloPlan         # who-sends-what for coords/values halo exchange
-    indices      :: Vector{Int}      # global tree-order permutation
-    offsets      :: Vector{Int}      # global depth-batch offsets
+struct PartitionedGraphGPProblem{P<:GraphGPProblem, DP, C}
+    local_prob :: P            # compacted GraphGPProblem: [context/halo ; owned-self] coords,
+                               #   neighbors remapped to LOCAL indices, local n0 = context size
+    dense_prob :: DP           # global dense first layer (root), else nothing
+    comm       :: C            # MPI.Comm
+    n0         :: Int          # global dense first-layer size
+    gids       :: Vector{Int}  # global point id of each local coord column (for data gather)
+    owned_cols :: Vector{Int}  # global refined columns (1..M) this rank owns
+    is_root    :: Bool
+    indices    :: Union{Nothing, Vector{Int}}
 end
 
-# scheme=:partition_coords selects scheme B; points_local are this rank's spatial slab.
-distribute(points_local::AbstractMatrix, comm; scheme=:partition_coords,
-           n0, k, bins, vals, halo_width) :: PartitionedGraphGPProblem
+distribute(prob, comm; scheme = :partition_coords) :: PartitionedGraphGPProblem
 ```
 
-`local_prob.neighbors` uses **rank-local indices** into `[owned ∪ ghost]`, not global ids — which is
-also the index-compression win (§5). The one-time halo exchange of `coords` (and of `values` for
-sampling) is a sparse neighbor-to-neighbor `Alltoallv` driven by `recv_plan`; after it, the existing
-per-point kernels run **unchanged** on `local_prob`, and the fitting reduction in §2 is identical.
+Each rank computes the same spatial (Morton) order of the refined points, takes its balanced
+contiguous chunk as `owned_cols` (so the partition needs no communication), and `_scheme_b_local`
+builds the compacted local problem holding **only owned + ghost coords** with neighbors remapped to
+local indices. The existing per-point drivers then run **unchanged**, and the fitting reduction is
+identical to scheme A. Implemented methods: `generate_logdet`, `generate_logdet_grad_vals`,
+`generate_logdet_and_grad_vals`, `generate_inv_loss_grad_vals` — all order-independent reductions,
+so the spatial partition is correctness-neutral.
+
+**Validated** (`bench/distributed/test_scheme_b.jl`, `mpiexec -n 1/2/4`, CPU): every quantity matches
+the serial oracle to f64 round-off (logdet relerr 0; grads ~1e-14), invariant to rank count, while
+the coords held per rank fall **100 % → 57 % → 33 %** at 1 → 2 → 4 ranks (ideal 25 % at 4; the gap is
+the Morton-bounded halo). The pure remap (`_scheme_b_local`) is also unit-tested without MPI in the
+main suite (`test/test_scheme_b.jl`).
+
+**Remaining for scheme B at 100B:** the input `prob` here is still replicated (as in scheme A) — the
+*from-scratch* no-replication path (each rank reads only its slab from disk + a neighbor-to-neighbor
+`Alltoallv` coords/values halo) rides on §4 (distributed build) + §5 (I/O); the remap and reduction
+above are unchanged.
 
 ## 4. Distributed graph construction ⬜ — the real blocker
 
@@ -156,14 +166,17 @@ count further. f64 reduction keeps cross-rank-count results reproducible to ~1e-
 
 ## 8. Phased plan
 
-1. **Scheme B** — `:partition_coords` constructor + coords/values halo exchange on top of the
-   existing `distributed_quantize`. Unblocks coords past the replication ceiling; fitting reduction
-   is unchanged.
-2. **Compact indexing** — rank-local 32-bit + owner tag; ~35 % off the dominant array.
-3. **Distributed build** — spatial decomp + ghost k-NN (spike bosque) + distributed depth
+1. **Scheme B fitting** ✅ — `:partition_coords` constructor + compacted local problem +
+   order-independent reductions. Unblocks per-rank coords past the replication ceiling; validated
+   multi-rank against the serial oracle (§3).
+2. **Compact indexing** ⬜ — store `local_prob.neighbors` as rank-local 32-bit + owner tag (the
+   remap already produces local indices); ~35 % off the dominant array.
+3. **From-scratch no-replication path** ⬜ — each rank reads only its slab; a neighbor-to-neighbor
+   `Alltoallv` coords/values halo replaces the replicated input (the remap/reduction are unchanged).
+4. **Distributed build** ⬜ — spatial decomp + ghost k-NN (spike bosque) + distributed depth
    relaxation + the distributed sort/renumber. Validate at a few-B N on a fat node, then scale.
-4. **Parallel graph I/O + checkpointing** (`save_graph`/`load_graph`).
-5. **Distributed single-field sampling** (per-batch halo) — only if a single field must exceed one
+5. **Parallel graph I/O + checkpointing** ⬜ (`save_graph`/`load_graph`).
+6. **Distributed single-field sampling** ⬜ (per-batch halo) — only if a single field must exceed one
    node; otherwise ensembles are free.
 
 **Net:** fitting at 100B is essentially solved by the merged scheme-A reduction plus scheme-B coords
@@ -171,7 +184,8 @@ partitioning; the real investment is **distributed graph construction and its TB
 with single-field sampling as an optional add-on that the shallow build has already de-risked.
 
 ## References in this repo
-- `src/distributed.jl` — scheme-A distributed problem, reductions, entry points (✅/🟡).
-- `ext/GraphGPMPIExt.jl` — MPI `Allreduce`/`Allgather` shims, GPU binding, balanced ranges.
-- `bench/distributed/` — single-node MPI spike + correctness/scaling harness.
+- `src/distributed.jl` — scheme-A + **scheme-B** distributed problems, reductions, entry points.
+- `ext/GraphGPMPIExt.jl` — `distribute` (both schemes), MPI shims, GPU binding, balanced ranges.
+- `bench/distributed/test_scheme_b.jl` — multi-rank scheme-B fitting vs serial + coords-compaction.
+- `test/test_scheme_b.jl` — pure `_scheme_b_local` remap unit test (no MPI).
 - `src/graph_build.jl`, `src/tree_special.jl` — the local build stages the distributed build reuses.

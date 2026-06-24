@@ -20,6 +20,7 @@ include("loadref.jl")
     include("test_degenerate.jl")
     include("test_grad_generate_vals.jl")
     include("test_graph_build.jl")
+    include("test_scheme_b.jl")
 end
 
 # GPU tests: automatically activated when CUDA is installed and a device is available.
