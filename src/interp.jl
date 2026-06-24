@@ -8,7 +8,7 @@
 # The bins are logarithmically spaced (see `make_cov_bins` in graphgp/extras.py), so the
 # bracketing interval is found with a binary search rather than a constant-stride index.
 @inline function cov_lookup(r::T, bins, vals, n::Int) where {T}
-    @inbounds begin
+    @inbounds @fastmath begin
         if r <= bins[1]
             return T(vals[1])
         elseif r >= bins[n]
@@ -41,7 +41,7 @@ end
 # segment (0 outside [bins[1], bins[n]]). Used for gradients w.r.t. point positions, where
 # d(cov)/d(x) = cov'(r) · dr/dx.
 @inline function cov_lookup_dr(r::T, bins, vals, n::Int) where {T}
-    @inbounds begin
+    @inbounds @fastmath begin
         (r <= bins[1] || r >= bins[n]) && return zero(T)
         lo = 1
         hi = n
@@ -60,7 +60,7 @@ end
 end
 
 @inline function cov_lookup_weights(r::T, bins, n::Int) where {T}
-    @inbounds begin
+    @inbounds @fastmath begin
         if r <= bins[1]
             return (1, one(T), zero(T))
         elseif r >= bins[n]

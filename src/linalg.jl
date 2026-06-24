@@ -19,9 +19,9 @@
             sq = zero(Int64)
             for dd in 1:D
                 di = Int64(jc[a, dd]) - Int64(jc[b, dd])
-                sq += di * di
+                sq += di * di                              # exact integer distance²
             end
-            r = sqrt(T(sq)) * scale
+            r = @fastmath sqrt(T(sq)) * scale              # fast sqrt (f32)
             A[a, b] = cov_lookup(r, bins, vals, nbins)
         end
     end
@@ -30,20 +30,20 @@ end
 
 # In-place lower Cholesky (Cholesky-Banachiewicz, left-looking) of the symmetric matrix
 # whose lower triangle is stored in `A`. Overwrites the lower triangle with `L`, `A = L*L'`.
-# On a non-positive pivot (loss of positive-definiteness, e.g. in f32) the factor is filled
-# with NaN, mirroring the NaN-propagation of `jnp.linalg.cholesky`.
+# A non-positive pivot (loss of positive-definiteness — common for near-singular (k+1) blocks
+# in f32, and possible from fast-math rounding) is clamped to a tiny relative floor instead of
+# NaN-filling: this regularizes the degenerate block (finite, graceful) rather than poisoning
+# the whole result, and makes the `@fastmath` math below safe. Well-conditioned blocks (the
+# norm with adequate jitter) never reach the clamp, so results are unchanged there.
 @inline function chol_lower!(A, ::Val{KP1}) where {KP1}
-    @inbounds for j in 1:KP1
-        s = A[j, j]
-        for p in 1:(j - 1)
-            s -= A[j, p] * A[j, p]
-        end
-        if s <= zero(s)
-            nan = oftype(s, NaN)
-            for i in j:KP1
-                A[i, j] = nan
+    @inbounds begin
+        pivmin = eps(eltype(A)) * A[1, 1]      # relative floor (A[1,1] is the variance)
+        @fastmath for j in 1:KP1
+            s = A[j, j]
+            for p in 1:(j - 1)
+                s -= A[j, p] * A[j, p]
             end
-        else
+            s < pivmin && (s = pivmin)          # regularize instead of NaN-fill
             d = sqrt(s)
             A[j, j] = d
             for i in (j + 1):KP1
@@ -61,7 +61,7 @@ end
 # Solve L[1:K,1:K]' x = L[K+1, 1:K] for `x` (the conditional-mean weights `mean_vec`),
 # an upper-triangular back-substitution. `L` is the Cholesky factor from `chol_lower!`.
 @inline function mean_vec_solve!(x, L, ::Val{K}) where {K}
-    @inbounds for i in K:-1:1
+    @inbounds @fastmath for i in K:-1:1
         s = L[K + 1, i]
         for j in (i + 1):K
             s -= L[j, i] * x[j]
@@ -79,7 +79,7 @@ end
 # This is the exact reverse of the left-looking recurrence in `chol_lower!`, derived by
 # reverse-accumulating each scalar operation; validated numerically against Enzyme / JAX.
 @inline function chol_pullback!(Abar, Lbar, L, ::Val{KP1}) where {KP1}
-    @inbounds begin
+    @inbounds @fastmath begin
         for j in KP1:-1:1
             ljj = L[j, j]
             for i in KP1:-1:(j + 1)

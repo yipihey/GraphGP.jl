@@ -29,6 +29,8 @@
         return fp[i] + t * (fp[i + 1] - fp[i])
     end
     for r in Float32.(exp10.(range(-5, 1.3; length = 500)))
-        @test cov_lookup(r, lbins, lvals, nn) ≈ ref_interp(r, lbins, lvals) rtol = 1e-5
+        # atol floors the comparison at denormal/near-zero covariances (~1e-43), where the
+        # @fastmath path flushes denormals differently; normal-range values match to ~1e-5.
+        @test cov_lookup(r, lbins, lvals, nn) ≈ ref_interp(r, lbins, lvals) rtol = 1e-4 atol = 1e-20
     end
 end

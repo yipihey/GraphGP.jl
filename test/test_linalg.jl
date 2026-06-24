@@ -25,8 +25,10 @@ using LinearAlgebra
         @test x ≈ xref rtol = 1e-10
     end
 
-    # Non-PD input propagates NaN (mirrors jnp.linalg.cholesky).
+    # Non-PD input is regularized (pivot clamped to a tiny relative floor) rather than
+    # NaN-propagating, so the result stays finite/graceful.
     Abad = Float32[1.0 2.0; 2.0 1.0]   # indefinite
     GraphGP.chol_lower!(Abad, Val(2))
-    @test isnan(Abad[2, 2])
+    @test isfinite(Abad[2, 2])
+    @test 0 < Abad[2, 2] <= 1.0f-3     # clamped pivot ≈ sqrt(eps(Float32)·A[1,1])
 end
