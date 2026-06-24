@@ -17,6 +17,7 @@ include("loadref.jl")
     include("test_orchestrate.jl")
     include("test_ordering.jl")
     include("test_aniso.jl")
+    include("test_degenerate.jl")
     include("test_graph_build.jl")
 end
 
@@ -198,6 +199,27 @@ let cuda_ok = false
                 fg = Array(generate(agpu, CuArray(xi)))
                 @test isapprox(fg, fc; rtol = 1e-3)                       # @fastmath GPU-vs-CPU
                 @test isapprox(generate_logdet(agpu), generate_logdet(acpu); rtol = 1e-4)
+            end
+
+            @testset "degenerate (coincident) blocks: GPU finite + matches CPU" begin
+                rng = MersenneTwister(0xDEAD)
+                n, D, n0d, kd = 5_000, 3, 128, 20
+                bs = collect(Float64, range(0, 2, 200)); vs = Float64.(exp.(-(bs) .^ 1.5)); vs[1] *= 1.001
+                p = rand(rng, n, D)
+                for i in 1:30; p[200 + i, :] = p[i, :]; end          # exact duplicates
+                pc = build_graph_ka(p, n0d, kd, bs, vs; backend = CPU())
+                pg = to_backend(pc, CUDABackend())
+                xi = randn(rng, n)
+                fc = generate(pc, xi)
+                fg = Array(generate(pg, CuArray(xi)))
+                @test all(isfinite, fg)                              # the reported NaN is gone
+                @test isapprox(fg, fc; rtol = 1e-3)                  # finite AND correct (CPU↔GPU)
+                v = randn(rng, n)
+                gc = generate_grad_xi(pc, v)
+                gg = Array(generate_grad_xi(pg, CuArray(v)))
+                @test all(isfinite, gg)
+                @test isapprox(gg, gc; rtol = 1e-3)
+                @test isapprox(sum(v .* fg), sum(gg .* xi); rtol = 1e-4)   # adjoint identity (GPU)
             end
 
             @testset "backend consistency check" begin

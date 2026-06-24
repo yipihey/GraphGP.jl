@@ -37,21 +37,35 @@ end
 # norm with adequate jitter) never reach the clamp, so results are unchanged there.
 @inline function chol_lower!(A, ::Val{KP1}) where {KP1}
     @inbounds begin
-        pivmin = eps(eltype(A)) * A[1, 1]      # relative floor (A[1,1] is the variance)
+        T = eltype(A)
+        pivmin = eps(T) * A[1, 1]               # relative floor (A[1,1] is the variance)
         @fastmath for j in 1:KP1
             s = A[j, j]
             for p in 1:(j - 1)
                 s -= A[j, p] * A[j, p]
             end
-            s < pivmin && (s = pivmin)          # regularize instead of NaN-fill
-            d = sqrt(s)
-            A[j, j] = d
-            for i in (j + 1):KP1
-                t = A[i, j]
-                for p in 1:(j - 1)
-                    t -= A[i, p] * A[j, p]
+            if s > pivmin                       # well-conditioned column (NaN-robust: false if s is NaN)
+                d = sqrt(s)
+                A[j, j] = d
+                for i in (j + 1):KP1
+                    t = A[i, j]
+                    for p in 1:(j - 1)
+                        t -= A[i, p] * A[j, p]
+                    end
+                    A[i, j] = t / d
                 end
-                A[i, j] = t / d
+            else
+                # Degenerate column (rank-deficient block from coincident/near-coincident points,
+                # or a NaN pivot): floor the diagonal and ZERO the column below it so it is inert.
+                # The original code divided the below-diagonal by sqrt(pivmin), producing huge
+                # entries that poisoned later columns and diverged between CPU and GPU @fastmath;
+                # zeroing keeps the factor finite and backend-consistent. The diagonal is unchanged
+                # from before (sqrt(pivmin)), so logdet is unaffected; the column's mean-vec weight
+                # is separately zeroed in `mean_vec_solve!`.
+                A[j, j] = sqrt(pivmin)
+                for i in (j + 1):KP1
+                    A[i, j] = zero(T)
+                end
             end
         end
     end
@@ -60,13 +74,30 @@ end
 
 # Solve L[1:K,1:K]' x = L[K+1, 1:K] for `x` (the conditional-mean weights `mean_vec`),
 # an upper-triangular back-substitution. `L` is the Cholesky factor from `chol_lower!`.
+#
+# Degenerate (coincident/near-coincident) neighbours give a rank-deficient block whose pivot was
+# clamped by `chol_lower!` to the tiny floor sqrt(eps·A[1,1]). Dividing by that floor produces a
+# huge weight — which stays finite on the CPU but overflows to Inf/NaN under the GPU's @fastmath,
+# then cascades through `generate`. Zero the weight when the diagonal is at the clamp floor: a
+# coincident neighbour then contributes NO conditional-mean information (the well-posed,
+# regularised choice — and identical on CPU and GPU). Well-conditioned pivots sit far above the
+# floor (bounded by the kernel jitter), so this never triggers for non-degenerate blocks.
 @inline function mean_vec_solve!(x, L, ::Val{K}) where {K}
-    @inbounds @fastmath for i in K:-1:1
-        s = L[K + 1, i]
-        for j in (i + 1):K
-            s -= L[j, i] * x[j]
+    T = eltype(L)
+    @inbounds @fastmath begin
+        pivfloor = T(1.5) * sqrt(eps(T)) * L[1, 1]   # clamped diagonals land at sqrt(eps)·L[1,1]
+        for i in K:-1:1
+            d = L[i, i]
+            if d > pivfloor
+                s = L[K + 1, i]
+                for j in (i + 1):K
+                    s -= L[j, i] * x[j]
+                end
+                x[i] = s / d
+            else
+                x[i] = zero(T)                       # degenerate neighbour → zero-information weight
+            end
         end
-        x[i] = s / L[i, i]
     end
     return nothing
 end
