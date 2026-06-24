@@ -32,6 +32,11 @@ function refine_logdet_terms(prob::GraphGPProblem{T}; backend = KernelAbstractio
     K = nneighbors(prob)
     D = ndims_space(prob)
     terms = KernelAbstractions.zeros(backend, T, M)
+    if _is_cpu(backend)
+        # Native @threads loop — the KA CPU backend is 5-10x slower here (see cpu_native.jl).
+        _native_refine_logdet_terms!(terms, prob, Val(K), Val(D))
+        return terms
+    end
     kernel = refine_logdet_kernel!(backend)
     kernel(terms, prob.coords, prob.neighbors, prob.n0, prob.scale, prob.bins, prob.vals,
         nbins(prob), Val(K), Val(D); ndrange = M, workgroupsize = _wgsize(backend))
@@ -51,6 +56,10 @@ function refine_inv!(xi_out, prob::GraphGPProblem{T}, values;
     M = nrefined(prob)
     K = nneighbors(prob)
     D = ndims_space(prob)
+    if _is_cpu(backend)
+        _native_refine_inv!(xi_out, prob, values, Val(K), Val(D))
+        return xi_out
+    end
     kernel = refine_inv_kernel!(backend)
     kernel(xi_out, prob.coords, prob.neighbors, values, prob.n0, prob.scale, prob.bins,
         prob.vals, nbins(prob), Val(K), Val(D); ndrange = M, workgroupsize = _wgsize(backend))
@@ -85,20 +94,30 @@ function refine!(values, prob::GraphGPProblem{T}, xi;
     mean_vec = KernelAbstractions.zeros(backend, T, K, M)
     std = KernelAbstractions.zeros(backend, T, M)
     wgs = _wgsize(backend)
-    refine_meanvec_std_kernel!(backend)(mean_vec, std, prob.coords, prob.neighbors, prob.n0,
-        prob.scale, prob.bins, prob.vals, nbins(prob), Val(K), Val(D);
-        ndrange = M, workgroupsize = wgs)
-    KernelAbstractions.synchronize(backend)
+    cpu = _is_cpu(backend)
+    if cpu
+        _native_refine_meanvec_std!(mean_vec, std, prob, Val(K), Val(D))
+    else
+        refine_meanvec_std_kernel!(backend)(mean_vec, std, prob.coords, prob.neighbors, prob.n0,
+            prob.scale, prob.bins, prob.vals, nbins(prob), Val(K), Val(D);
+            ndrange = M, workgroupsize = wgs)
+        KernelAbstractions.synchronize(backend)
+    end
 
-    apply = refine_apply_kernel!(backend)
+    apply = cpu ? nothing : refine_apply_kernel!(backend)
     offs = prob.offsets                      # 0-based exclusive batch ends; offs[1] == n0
     for b in 2:length(offs)
         m_lo = offs[b - 1] - prob.n0 + 1     # first refined column (1-based) in this batch
         len = offs[b] - offs[b - 1]
         len <= 0 && continue
-        apply(values, mean_vec, std, prob.neighbors, xi, prob.n0, m_lo, Val(K);
-            ndrange = len, workgroupsize = wgs)
-        KernelAbstractions.synchronize(backend)
+        if cpu
+            _native_refine_apply!(values, mean_vec, std, prob.neighbors, xi, prob.n0, m_lo,
+                len, Val(K))
+        else
+            apply(values, mean_vec, std, prob.neighbors, xi, prob.n0, m_lo, Val(K);
+                ndrange = len, workgroupsize = wgs)
+            KernelAbstractions.synchronize(backend)
+        end
     end
     return values
 end

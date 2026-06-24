@@ -182,26 +182,33 @@ scalar O(N²) query.) Validated by `check_graph` + generate/inverse roundtrip. S
 `build_graph_ka(CuArray(points), …) → generate/refine/gradients` runs end-to-end on the GPU
 with no Python and no host round-trip.
 
-## CPU path — NUMA thread pinning (ThreadPinning.jl)
+## CPU path — native multithreading + NUMA pinning
 
-The same KA kernels run on the CPU backend (`julia -t N`). On a **2-socket AMD EPYC 7763
-(128 cores, 16 NUMA nodes)** the forward path is memory-bandwidth-bound and scales poorly past
-~32 threads; pinning worker threads round-robin across NUMA nodes (`pinthreads(:numa)`) spreads
-the load over all memory controllers and helps the more arithmetic-heavy gradient most.
-Measured with `test/bench_cpu_pin.jl` (2 M points, K=10, D=3, f32, best-of-N):
+The forward per-point kernels run on the CPU backend (`julia -t N`). Two findings on a
+**2-socket AMD EPYC 7763 (128 cores, 16 NUMA nodes)**, both via `test/bench_cpu_pin.jl`
+(2 M points, K=10, D=3, f32, best-of-N):
 
-| threads | strategy | refine_logdet | refine_inv | grad (cov_vals) |
+**1. Bypass the KernelAbstractions CPU backend.** The KA CPU backend carries heavy
+per-workgroup launch + `@private` overhead and its scheduler *degrades* past ~64 threads. A
+plain `@threads` loop over the **same** inner kernels (`_gather_joint!` / `assemble_cov!` /
+`chol_lower!` / `mean_vec_solve!`) with per-thread scratch is 5–13× faster and actually scales.
+`refine_logdet`/`refine_inv` now dispatch to this native path on CPU (`src/cpu_native.jl`); the
+GPU keeps the KA kernels, and the cov_vals gradient was already native (`Threads.@spawn`).
+
+| threads | op | KA backend | native | speedup |
 | --- | --- | --- | --- | --- |
-| 64 | none | 2.0 | 0.9 | 4.8 |
-| 64 | `:numa` | **2.5** | 1.0 | 6.5 |
-| 128 | none | 2.2 | 0.9 | 5.4 |
-| 128 | `:numa` | 2.0 | 0.7 | **8.6** |
+| 64  | refine_logdet | 2.5 | **12.8** | 5.1× |
+| 64  | refine_inv    | 1.0 | **13.1** | 13×  |
+| 128 | refine_logdet | 2.0 (degrades) | **16.8** | 8.4× |
 
-(M pts·s⁻¹.) `:numa` gives **+35% (64 thr) to +59% (128 thr)** on the gradient and ~+25% on
-logdet; `:cores`/`:sockets` (compact placement) do not help. This is a **runtime** setting for
-CPU users — `using ThreadPinning; pinthreads(:numa)` — not a library dependency (a library must
-not pin its host application's threads). Note the CPU path remains ~100× slower than the GPU
-(255 M/s logdet); the GPU is the production path. ThreadPinning lives only in the `bench/` env.
+**2. Pin threads across NUMA nodes.** `using ThreadPinning; pinthreads(:numa)` (round-robin
+across the 16 NUMA nodes) adds ~+25% on logdet and +35–59% on the gradient over the unpinned
+native path; `:cores`/`:sockets` (compact) do not help. This is a **runtime** setting for CPU
+users — not a package dep (a library must not pin its host app's threads); ThreadPinning lives
+only in the `bench/` env.
+
+(M pts·s⁻¹.) The native path closes most of the gap but the CPU is still ~15× slower than the
+GPU (255 M/s logdet); the GPU remains the production path.
 
 ## Takeaways
 
