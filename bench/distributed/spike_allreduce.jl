@@ -1,6 +1,6 @@
 # Phase 0 plumbing spike: MPI rank/GPU binding + Allreduce (host and, if available, device).
 #
-#   mpiexec -n <R> julia --project=julia/GraphGP/bench/distributed spike_allreduce.jl
+#   mpiexec -n <R> julia --project=bench/distributed spike_allreduce.jl
 #
 # Verifies: MPI.Init, one-rank-per-GPU binding via the node-local communicator, a host
 # Allreduce, and a CUDA-aware-or-host-staged device Allreduce. This is the gate before any

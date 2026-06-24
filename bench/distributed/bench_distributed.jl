@@ -1,7 +1,7 @@
 # Phase 1 scaling benchmark: time the distributed fused logdet + vals gradient (the fitting
 # inner loop) across ranks.
 #
-#   mpiexec -n <R> julia --project=julia/GraphGP/bench/distributed bench_distributed.jl [N] [K] [cpu|gpu]
+#   mpiexec -n <R> julia --project=bench/distributed bench_distributed.jl [N] [K] [cpu|gpu]
 #
 # Each rank holds the full graph (replicated) and computes its column slice, so fixing N and
 # growing R is a STRONG-scaling test: per-iteration time should fall ~linearly until the

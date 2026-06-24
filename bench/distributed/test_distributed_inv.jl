@@ -1,7 +1,7 @@
 # Phase 2 correctness: distributed inverse-quadratic loss gradient + refine_inv must reproduce
 # the serial result and be rank-invariant.
 #
-#   mpiexec -n <R> julia --project=julia/GraphGP/bench/distributed test_distributed_inv.jl [N] [K] [cpu|gpu]
+#   mpiexec -n <R> julia --project=bench/distributed test_distributed_inv.jl [N] [K] [cpu|gpu]
 using MPI
 using GraphGP
 using Random

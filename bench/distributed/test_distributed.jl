@@ -1,7 +1,7 @@
 # Phase 1 correctness: distributed log-likelihood + vals gradient must reproduce the serial
 # result, and be invariant to the rank count.
 #
-#   mpiexec -n <R> julia --project=julia/GraphGP/bench/distributed test_distributed.jl [N] [K]
+#   mpiexec -n <R> julia --project=bench/distributed test_distributed.jl [N] [K]
 #
 # Every rank builds the SAME graph (fixed seed) so each holds the full problem; `distribute`
 # then gives each rank a column slice. We compare the distributed generate_logdet /

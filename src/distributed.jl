@@ -54,7 +54,7 @@ KernelAbstractions.get_backend(d::DistributedGraphGPProblem) = KernelAbstraction
 @noinline function _mpi_required(fname::String)
     error("GraphGP.$fname requires the MPI extension, which is not loaded. Add MPI to your " *
           "environment and run `using MPI` alongside `using GraphGP` to enable distributed " *
-          "GraphGP. See julia/GraphGP/bench/distributed/README.md.")
+          "GraphGP. See bench/distributed/README.md.")
 end
 
 """

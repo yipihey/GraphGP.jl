@@ -34,7 +34,7 @@ logdet is invariant to the depth reorder) but is not depth-batched for forward `
 `mpiexec` ships with MPI.jl. The simplest launcher:
 
 ```bash
-cd julia/GraphGP/bench/distributed
+cd bench/distributed
 julia --project=. -e 'using Pkg; Pkg.instantiate()'
 
 # one-liner that runs R ranks of a script:
@@ -54,12 +54,12 @@ PMI), then launch with `srun`:
 
 ```bash
 # 1. point MPI.jl at the system OpenMPI (module must be loaded), then re-precompile:
-julia --project=julia/GraphGP/bench/distributed -e \
+julia --project=bench/distributed -e \
   'using MPIPreferences; MPIPreferences.use_system_binary()'
-julia --project=julia/GraphGP/bench/distributed -e 'using Pkg; Pkg.precompile()'  # ONCE, single rank
+julia --project=bench/distributed -e 'using Pkg; Pkg.precompile()'  # ONCE, single rank
                                                                                   # (shared depot: avoid concurrent first-run races)
 # 2. in the batch script, one rank per GPU:
-srun -n $NTASKS --gpus-per-task=1 julia --project=julia/GraphGP/bench/distributed \
+srun -n $NTASKS --gpus-per-task=1 julia --project=bench/distributed \
   bench_distributed.jl 1000000000 20 gpu
 ```
 

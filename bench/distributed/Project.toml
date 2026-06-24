@@ -3,7 +3,7 @@
 # the system OpenMPI with MPIPreferences.use_system_binary() (see README); the default JLL MPI
 # is fine for local multi-rank testing via `mpiexec`.
 #
-#   julia --project=julia/GraphGP/bench/distributed -e 'using Pkg; Pkg.instantiate()'
+#   julia --project=bench/distributed -e 'using Pkg; Pkg.instantiate()'
 [deps]
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 GraphGP = "58493978-3208-4978-a170-e38d678289e7"

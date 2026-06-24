@@ -12,7 +12,7 @@
 # K_DD·v and K_{*D}·w are sub-blocks of the full K-apply via an embed/extract by the data mask.
 # (K_DD + N) is solved by conjugate gradient; one CG operator is reused across mean + all samples.
 #
-#   julia -t N --project=julia/GraphGP/bench run_posterior.jl <in.npz> <out.npz>
+#   julia -t N --project=bench run_posterior.jl <in.npz> <out.npz>
 #
 # in.npz : the joint graph (coords/neighbors/offsets/n0/scale/cov_bins32/cov_vals32/indices over
 #          Xall, original = input order [pred; data]), data_mask (N,) {0,1}, y_data (nd,),

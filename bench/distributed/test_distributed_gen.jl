@@ -3,7 +3,7 @@
 #   3a — independent realizations: each rank draws its own field; they must be distinct and each
 #        must equal the serial draw with the same seed.
 #
-#   mpiexec -n <R> julia --project=julia/GraphGP/bench/distributed test_distributed_gen.jl [N] [K]
+#   mpiexec -n <R> julia --project=bench/distributed test_distributed_gen.jl [N] [K]
 using MPI
 using GraphGP
 using Random

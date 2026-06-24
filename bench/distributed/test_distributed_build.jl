@@ -5,7 +5,7 @@
 #   (B) distributed_quantize over spatially-partitioned points must match the serial global
 #       lattice (origin/scale).
 #
-#   mpiexec -n <R> julia --project=julia/GraphGP/bench/distributed test_distributed_build.jl [N] [K]
+#   mpiexec -n <R> julia --project=bench/distributed test_distributed_build.jl [N] [K]
 using MPI
 using GraphGP
 using Random
