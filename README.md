@@ -200,6 +200,15 @@ Pass `CuArray` inputs (and `CUDA` in your environment) and the same calls run on
 move a built problem with `to_backend(prob, CUDABackend())`. The package has no hard CUDA
 dependency; GPU-specific primitives are provided by a `CUDA` package extension.
 
+## Optional hand-written-CUDA path
+
+GraphGP.jl can also call the original `graphgp_cuda` hand-written kernels directly (build
+`csrc/build.jl`, then `refine_logdet_custom` / `refine_inv_custom` with `using CUDA`). Measured on
+an A6000, this is **not** faster than the portable KA path for these per-point ops — KA already
+matches or beats the hand-written reference (it specializes on exact `k`) — so it is off by default
+and kept as a validated cross-check + a drop-in point for future kernels. See
+[`csrc/README.md`](csrc/README.md) and [`docs/benchmarks.md`](docs/benchmarks.md) §8.
+
 ## Documentation
 
 - [`docs/benchmarks.md`](docs/benchmarks.md) — performance, memory, correctness vs the CUDA extension.

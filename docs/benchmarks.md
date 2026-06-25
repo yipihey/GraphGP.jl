@@ -185,7 +185,28 @@ one-time CPU cost (~74 s at 1 M, D=3) — moving it on-device is a possible futu
 off the hot path. `build_graph_ka` remains the fully-on-device build (valid Vecchia graph, but not
 byte-identical to JAX — sort tie-breaking differs).
 
-## 8. Notes / honest caveats
+## 8. Optional custom-CUDA path — and why it is not a win here
+
+GraphGP.jl can call the original `graphgp_cuda` hand-written kernels directly (an `extern "C"`
+bridge in `csrc/`, the `GraphGPCUDAExt` extension, `refine_logdet_custom` / `refine_inv_custom`).
+We added it to chase the ~2× that hand-CUDA bought on the hydro solvers — it does **not** transfer.
+A6000, Float32, D=3, custom-kernel-only vs KA throughput:
+
+| op | k=8 | k=10 | k=16 |
+| --- | --- | --- | --- |
+| `refine_logdet` KA | **415 M/s** | **257 M/s** | 74 M/s |
+| `refine_logdet` custom | 365 M/s | 219 M/s | 74 M/s |
+| `refine_inv` KA | **352 M/s** | **210 M/s** | 65 M/s |
+| `refine_inv` custom | 291 M/s | 177 M/s | 62 M/s |
+
+Same answer (validated ~1–7e-6 f32). These per-point kernels are register/occupancy-bound, so there
+is little for a hand-written kernel to exploit, and the KA path **specializes on the exact `k`**
+(`Val(K)`) while the vendored kernel pads to `MAX_K ∈ {4,8,16,32,64}` (hence KA's edge at
+non-power-of-two `k`, parity at large `k`). The portable path is already at/above the hand-written
+reference. The bridge stays as a cross-check + a drop-in point for future hand-tuned kernels — see
+[`csrc/README.md`](../../csrc/README.md).
+
+## 9. Notes / honest caveats
 
 - **Derivatives are on-device.** `generate_grad_xi` / `generate_grad_vals` run their reverse
   depth-batch sweep on the GPU (per-batch kernels, latest-first, one stream; dense first layer on

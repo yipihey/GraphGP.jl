@@ -246,6 +246,26 @@ let cuda_ok = false
                     prob_cpu.offsets, prob_cpu.n0, prob_cpu.scale,
                     prob_cpu.bins, prob_cpu.vals)
             end
+
+            # Optional hand-written-CUDA accelerator: only if the .so has been built
+            # (csrc/build.jl). Validates the custom path matches the KA path to f32.
+            customlib = get(ENV, "GRAPHGP_CUDA_LIB",
+                joinpath(pkgdir(GraphGP), "csrc", "libgraphgpcapi.so"))
+            if isfile(customlib)
+                @testset "custom CUDA accelerator vs KA (f32)" begin
+                    rng = Random.MersenneTwister(7)
+                    N, D, n0c, kc = 20_000, 3, 256, 10
+                    pts = randn(rng, N, D)
+                    b32, v32 = rbf_kernel(1.0f0, 0.3f0, 1f-4, 1f1, 200; jitter = 1f-2)
+                    pc = build_graph(pts, n0c, kc, Float32.(b32), Float32.(v32))
+                    pg = to_backend(pc, CUDABackend())
+                    @test isapprox(refine_logdet_custom(pg), refine_logdet(pg); rtol = 1e-4)
+                    field = generate(pg, CuArray(randn(Float32, N)))
+                    xi_c = Array(refine_inv_custom(pg, field))
+                    xi_k = Array(refine_inv(pg, field))
+                    @test sqrt(sum(abs2, xi_c .- xi_k)) / sqrt(sum(abs2, xi_k)) < 1e-4
+                end
+            end
         end
     end
 end

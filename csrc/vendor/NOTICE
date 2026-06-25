@@ -1,0 +1,6 @@
+These CUDA headers are vendored from the `graphgp_cuda` extension of the original
+graphgp project (https://github.com/yipihey/graphgp), MIT-licensed, © Benjamin Dodge
+and Philipp Frank. They contain the per-point device kernels (cov_lookup, cholesky,
+refine_logdet, refine_inv). GraphGP.jl wraps them with a thin C ABI (../graphgp_capi.cu)
+so the hand-written CUDA path can be called from Julia as an optional accelerator
+alongside the portable KernelAbstractions kernels.

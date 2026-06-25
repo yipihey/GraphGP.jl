@@ -4,3 +4,7 @@ Manifest.toml
 # local Python env for the comparison benchmarks (graphgp_cuda / jax)
 .venv-gpu/
 .venv*/
+
+# custom-CUDA accelerator build artifacts (built out-of-band by csrc/build.jl)
+csrc/*.so
+csrc/*.o

@@ -22,6 +22,7 @@ include("graph_build.jl")
 include("chainrules.jl")
 include("grad_generate_vals.jl")
 include("distributed.jl")
+include("custom_cuda.jl")
 
 export GraphGPProblem, npoints, nneighbors, nrefined, ndims_space, nbins, to_backend
 export cov_lookup
@@ -52,5 +53,7 @@ export refine_inv_loss_grad_points, generate_inv_loss_grad_points
 export DistributedGraphGPProblem, distribute, distributed_build_graph, distributed_quantize
 export PartitionedGraphGPProblem   # scheme B: partitioned coords + halo
 export save_graph, load_graph      # parallel checkpoint of a distributed graph
+# Optional hand-written CUDA accelerator (needs `using CUDA` + a built csrc/libgraphgpcapi.so)
+export refine_logdet_custom, refine_inv_custom
 
 end # module
