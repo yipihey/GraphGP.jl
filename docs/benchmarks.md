@@ -15,12 +15,13 @@ science carry no more); correctness is cross-checked in Float64 where it clarifi
   Float32 (GPU), and matches the Python anisotropic kernel to ~1e-15.
 - **GPU per-point ops: at parity with the CUDA extension at scale, faster at small/medium N** (the
   extension is launch-overhead-bound below ~5 M points).
-- **Forward + both derivatives now run on-device** (per-batch kernels in one CUDA stream — no
-  per-batch host sync, no host-bound reverse sweep). On the shallow heap-order graph (§7),
-  K=8, A6000: **at 1 M GraphGP.jl beats the CUDA extension on all three** — forward 6.2 ms vs
-  13.7 ms (2.2×), d/dxi 6.5 ms vs 15.7 ms (2.4×), d/dcov_vals 41 ms vs 84 ms (2.0×). **At 10 M
-  it wins d/dxi** (76 ms vs 120 ms) but trails on forward (70 ms vs 63 ms, ~12 %) and d/dcov_vals
-  (689 ms vs 388 ms) — the extension fuses the heavier per-point reverse better at scale (§3).
+- **Forward pass + both derivatives, on-device, at scale.** The CUDA extension *does* differentiate
+  the forward `generate` (w.r.t. `xi` **and** `cov_vals`, on-GPU) — a real head-to-head, not a
+  capability gap. At the target scale (10–40 M, K=8, A6000; §2) GraphGP.jl **wins both
+  derivatives** — d/dxi ~1.5–1.6× (e.g. 153 vs 238 ms at 20 M), d/dcov_vals ~1.6× (443 vs 724 ms) —
+  while the extension wins forward `generate` by ~1.1–1.2× (139 vs 119 ms). (At 1–2 M, below target
+  scale, GraphGP.jl leads all three, but that's the extension's launch-overhead regime — §3.) The
+  extension has **no** gradient rule for the log-det / inverse-loss ops, which GraphGP.jl adds (§4).
 - **Native, Python-free graph build — byte-identical to Python.** `build_graph` now constructs the
   JAX "special order" heap-layout k-d tree and preceding-neighbour query in pure Julia, producing
   a graph **identical** to `gp.build_graph` (permutation, split dims, every neighbour, depth
@@ -82,34 +83,39 @@ M pts·s⁻¹** in GraphGP.jl across 200 K–20 M. (The CUDA extension different
 *generate* on-GPU — see §3/§4 — but its v0.0.4 had no autodiff rule for the log-det op
 specifically; pure-JAX can but is ~1000× slower.)
 
-### Scaling to 10 M points, K=8
+### At scale — the forward pass + its derivatives (the operating point we care about)
 
-K=8 has smaller `(k+1)` blocks → less private memory → higher GPU occupancy, so the fully-parallel
-ops scale even better. A6000, Float32:
+The interesting regime is **tens of millions of points** (the science target), not 1–2 M — small N
+is the CUDA extension's launch-overhead regime and is not representative. The forward pass is also
+exactly where the extension *has* derivatives (`jax.grad` through `generate(cuda=True)` w.r.t. `xi`
+**and** `cov_vals`), so all three are a genuine head-to-head. A6000 (48 GB), K=8, D=3, Float32,
+wall-clock ms (lower is better); GraphGP.jl on the byte-identical shallow `build_graph`, the CUDA
+extension via its own `cuda=True` build:
 
-| op @ 10 M, K=8 | GraphGP.jl | CUDA extension |
-| --- | --- | --- |
-| `refine_logdet` | **398 M/s** | — |
-| `refine_inv` | **327 M/s** | — |
-| forward `generate` | 142 M/s (70.5 ms) | **158 M/s** (63.2 ms) |
-| d/dxi (analytic, on-device) | **131 M/s (76.3 ms)** | 84 M/s (119.6 ms) |
-| d/dcov_vals (analytic, on-device) | 14.5 M/s (689 ms) | **26 M/s (387.5 ms)** |
+| N | forward `generate` (jl / cu) | d/dxi (jl / cu) | d/dcov_vals (jl / cu) |
+| --- | --- | --- | --- |
+| 10 M | 68 / **63** | **74** / 120 | **232** / 388 |
+| 20 M | 139 / **119** | **153** / 238 | **443** / 724 |
+| 40 M | 281 / **234** | **317** / 475 | **872** / 1395 |
+| 80 M | — / 462 | — / 949 | — / 2687 |
 
-Three findings at this scale (all on-device now — the depth-batch apply and the reverse sweep
-were moved off the host): (1) the per-point parallel ops are very fast; (2) GraphGP.jl **wins
-d/dxi** (1.6×); (3) it trails the extension on forward `generate` (~12 %) and on d/dcov_vals
-(1.8×) — the extension fuses the heavier per-point reverse (Cholesky-vals backward + histogram
-scatter) better at 10 M. Closing those two at scale is the remaining lever; at 1 M GraphGP.jl is
-ahead on all three (§3).
+At scale GraphGP.jl **wins both derivatives** — d/dxi by ~1.5–1.6× and d/dcov_vals by ~1.6× — while
+the extension wins the forward `generate` by ~1.1–1.2× (it fuses the sequential depth-batch apply a
+bit tighter). Memory is not the constraint: the CUDA extension's forward is ~93 B/pt (1.86 GB at
+20 M, 7.2 GB at 80 M), and GraphGP.jl is similar — an A6000 holds **hundreds of millions of points**;
+the practical ceiling at these sizes is graph *build* time, not device memory. (The `80 M` GraphGP.jl
+cells are blank only because its parallel CPU build is gather-bound at that N, not for any GPU
+reason — see §7; the on-GPU forward/grads would run.)
 
-Peak GPU memory at 10 M, K=8 (all sub-GB, comfortably within 48 GB): GraphGP.jl forward 700 MB,
-d/dxi 400 MB, d/dcov_vals 360 MB; CUDA-ext forward 1.0 GB.
+The fully-parallel per-point ops scale even better at K=8 (smaller `(k+1)` blocks → higher
+occupancy): `refine_logdet` ~398 M/s, `refine_inv` ~327 M/s at 10 M.
 
-## 3. Forward-pass derivatives — speed (A6000, 1 M, K=8, shallow heap-order graph)
+## 3. Small-N reference (1 M, K=8) — below target scale
 
-Both forward derivatives run on-device (per-batch reverse kernels, latest-first, in one CUDA
-stream; dense first layer on the host). At 1 M GraphGP.jl is **faster than the CUDA extension on
-all three** measured on the same machine:
+For completeness at small N (the extension's launch-overhead regime — **not** the operating point
+we optimise for; see §2 for the at-scale comparison). Both forward derivatives run on-device
+(per-batch reverse kernels, latest-first, one CUDA stream; dense first layer on the host). At 1 M
+GraphGP.jl leads on all three because the extension is launch-bound here:
 
 | op | graphgp-cuda | GraphGP.jl | speedup |
 | --- | --- | --- | --- |
@@ -117,10 +123,9 @@ all three** measured on the same machine:
 | d/dxi (white-noise → field) | 15.7 ms | **6.5 ms** | 2.4× |
 | d/dcov_vals (kernel derivative) | 84.4 ms | **41.2 ms** | 2.0× |
 
-GraphGP.jl also uses less device memory on the derivatives (it keeps only `mean_vec`/`std` and the
-recomputed field on the GPU; ~40 MB vs the extension's ~110 MB at 1 M — but the two metrics are
-measured differently, so treat MB as indicative). The crossover with the extension is at scale:
-by 10 M the extension retakes forward and d/dcov_vals while GraphGP.jl keeps d/dxi (§2).
+These small-N margins shrink and partly invert as N grows into the launch-amortised regime (§2):
+at 10–40 M GraphGP.jl keeps the win on **both derivatives** (~1.5–1.6×) but the extension edges
+ahead on the forward `generate` (~1.1–1.2×).
 
 ## 4. The differentiability surface
 
@@ -227,9 +232,10 @@ reference. The bridge stays as a cross-check + a drop-in point for future hand-t
 
 - **Derivatives are on-device.** `generate_grad_xi` / `generate_grad_vals` run their reverse
   depth-batch sweep on the GPU (per-batch kernels, latest-first, one stream; dense first layer on
-  the host). Faster than the extension at 1 M on all three; at 10 M GraphGP.jl wins d/dxi but the
-  extension retakes forward (~12 %) and d/dcov_vals (1.8×) — fusing the heavier per-point reverse
-  at scale is the open lever.
+  the host). At target scale (10–40 M) GraphGP.jl wins **both** derivatives (d/dxi ~1.5–1.6×,
+  d/dcov_vals ~1.6×); the CUDA extension wins only the forward `generate` (~1.1–1.2×). The
+  extension differentiates the forward generate (xi, cov_vals) too, but has no log-det/inverse-loss
+  gradient rule (§4).
 - **Anisotropic kernel.** `K(Δspatial, Δz)` (observed-coordinate clustering) is a forward-only
   drop-in matching the Python fork to ~1e-15; same throughput characteristics as the isotropic path.
 
