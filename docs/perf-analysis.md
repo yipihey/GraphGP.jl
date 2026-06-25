@@ -161,13 +161,28 @@ allocated ~16 GB**; `query_preceding_neighbors_special` 10%; everything else (`c
 `pts[p,:]` slicing; the sort uses `QuickSort` (total-order comparator, no temp buffer). The M
 preceding-neighbour queries (independent, read-only traversal, disjoint output columns) are threaded.
 
-**Result.** `build_graph` 30.8 s → 1.94 s @500k; 74 s → 12.1 s (1 thread) → **6.1 s (16 threads) =
-12×** @1M; allocations 16 GB → 0.22 GB. Byte-identity to Python's `gp.build_graph` preserved
-(0/22976 neighbour mismatches). The remaining build cost is the inherent per-level `sort` in
-`build_tree_special` (serial); the smaller leftovers the audit flagged (`quantize` broadcasts,
-`order_by_depth` slicing, `_compute_offsets` `push!`, scheme-B `Set`/`Dict`) are each <1% now and not
-worth chasing. The GPU forward/gradient depth-batch sweeps are already on-device with a single sync;
-their sequential-across-batches structure is intrinsic to Vecchia and not parallelizable.
+**Result of the type-stability fix.** `build_graph` 30.8 s → 1.94 s @500k; 74 s → 12.1 s (1 thread)
+@1M; allocations 16 GB → 0.22 GB.
+
+**Then parallelized for large datasets.** The per-level passes moved into top-level threaded helpers
+(`_bt_splitdims!`/`_bt_pad!`/`_bt_gather!`/`_bt_update!` via `Threads.@threads`) and the per-level
+sort became a parallel merge-sort (`_bt_psort!`: parallel chunk sorts + parallel pairwise-merge
+rounds, serial-QuickSort fallback below 8192/1 thread). These are *functions*, not closures, so the
+swapped `pts`/`indices` buffers aren't captured-and-boxed. The total-order comparator makes the
+merge deterministic = the serial order, so byte-identity holds (also verified vs brute-force
+preceding-kNN, 0 mismatches). `query_preceding_neighbors_special` is likewise threaded (independent
+queries, disjoint output columns); `seg_minmax` stays serial (keyed reduction).
+
+**Final result (16 threads):** `build_tree_special` @1M 5.06 s → 1.88 s (2.7×, Amdahl-limited by
+the serial `seg_minmax`/copies); query 7.11 s → 0.97 s (7.3×); **full `build_graph` @1M 74 s →
+3.3 s = 22×** over the original, byte-identical. At ≥5M the build becomes **gather-memory-bound**
+(the `pts[p[i]]` permutation gather is random access over a >100 MB working set), which threading
+helps but cannot fully hide — the remaining lever there would be a cache-blocked/radix permute.
+
+The smaller leftovers the audit flagged (`quantize` broadcasts, `order_by_depth` slicing,
+`_compute_offsets` `push!`, scheme-B `Set`/`Dict`) are each <1% now and not worth chasing. The GPU
+forward/gradient depth-batch sweeps are already on-device with a single sync; their
+sequential-across-batches structure is intrinsic to Vecchia and not parallelizable.
 
 ## Method notes / caveats
 - No `ncu`/`nsys` here, so achieved occupancy, DRAM throughput %, and stall reasons are inferred, not
