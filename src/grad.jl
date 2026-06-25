@@ -397,19 +397,20 @@ function generate_grad_xi(prob::GraphGPProblem{T}, vbar::AbstractVector;
     K = nneighbors(prob)
     D = ndims_space(prob)
 
-    # mean_vec (K×M) and std (M) via the parallel kernel.
+    # On the GPU, run the reverse depth-batch sweep on-device (per-batch kernels in one stream)
+    # instead of bringing mean_vec/std to the host — closes the host-bound gap with the CUDA
+    # extension's on-GPU derivative. The fused kernel recomputes mean_vec/std per point inline, so
+    # the full (K×M) mean_vec is never materialised (the d/dxi adjoint's dominant transient).
+    _is_cpu(backend) ||
+        return _generate_grad_xi_device(prob, vbar, Val(K), Val(D), backend)
+
+    # CPU path: materialise mean_vec/std once, then the host reverse sweep.
     mean_vec = KernelAbstractions.zeros(backend, T, K, M)
     std = KernelAbstractions.zeros(backend, T, M)
     refine_meanvec_std_kernel!(backend)(mean_vec, std, prob.coords, prob.neighbors, n0,
         prob.scale, prob.bins, prob.vals, nbins(prob), Val(K), Val(D);
         ndrange = M, workgroupsize = _wgsize(backend))
     KernelAbstractions.synchronize(backend)
-
-    # On the GPU, run the reverse depth-batch sweep on-device (per-batch kernels in one stream)
-    # instead of bringing mean_vec/std to the host — closes the host-bound gap with the CUDA
-    # extension's on-GPU derivative.
-    _is_cpu(backend) ||
-        return _generate_grad_xi_device(prob, vbar, mean_vec, std, Val(K), Val(D), backend)
 
     mv = Array(mean_vec)
     sd = Array(std)
@@ -467,7 +468,7 @@ end
 # apply): per-batch refine_reverse_apply_kernel! launched latest-first in one stream, then the
 # small dense first-layer adjoint on the host. `mean_vec`/`std` stay on the device.
 function _generate_grad_xi_device(prob::GraphGPProblem{T}, vbar::AbstractVector,
-        mean_vec, std, ::Val{K}, ::Val{D}, backend) where {T, K, D}
+        ::Val{K}, ::Val{D}, backend) where {T, K, D}
     n0 = prob.n0
     N = npoints(prob)
     offs = prob.offsets
@@ -478,12 +479,13 @@ function _generate_grad_xi_device(prob::GraphGPProblem{T}, vbar::AbstractVector,
     vb = prob.indices !== nothing ? vbb[_move_to_backend(prob.indices, backend)] : copy(vbb)
     xg = KernelAbstractions.zeros(backend, T, N)
 
-    rk = refine_reverse_apply_kernel!(backend)
+    rk = refine_reverse_apply_fused_kernel!(backend)
     @inbounds for b in length(offs):-1:2
         m_lo = offs[b - 1] - n0 + 1
         len = offs[b] - offs[b - 1]
         len <= 0 && continue
-        rk(xg, vb, mean_vec, std, prob.neighbors, n0, m_lo, Val(K); ndrange = len, workgroupsize = wgs)
+        rk(xg, vb, prob.coords, prob.neighbors, n0, m_lo, prob.scale, prob.bins, prob.vals,
+            nbins(prob), Val(K), Val(D); ndrange = len, workgroupsize = wgs)
     end
     KernelAbstractions.synchronize(backend)
 

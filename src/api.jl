@@ -115,35 +115,45 @@ function refine!(values, prob::GraphGPProblem{T}, xi;
     M = nrefined(prob)
     K = nneighbors(prob)
     D = ndims_space(prob)
-    mean_vec = KernelAbstractions.zeros(backend, T, K, M)
-    std = KernelAbstractions.zeros(backend, T, M)
     wgs = _wgsize(backend)
     cpu = _is_cpu(backend)
-    if prob.cov !== nothing                                   # anisotropic kernel
-        cov = prob.cov
-        if cpu
-            _native_refine_meanvec_std_aniso!(mean_vec, std, prob, Val(K), Val(D))
-        else
-            refine_meanvec_std_kernel_aniso!(backend)(mean_vec, std, prob.coords, prob.neighbors,
-                prob.n0, prob.scale, cov.spatial_bins, cov.z_bins, cov.grid, T(cov.alpha),
-                Val(K), Val(D); ndrange = M, workgroupsize = wgs)
+    offs = prob.offsets                      # 0-based exclusive batch ends; offs[1] == n0
+
+    if prob.cov === nothing
+        # ISOTROPIC: fused per-batch apply — assemble/factorize/solve/apply inline, so `mean_vec`
+        # (K×M) is never materialised and there is no separate full-M mean/std pass (one fused pass,
+        # like the CUDA extension's forward). Sequential over depth batches; one stream, one sync.
+        fused = cpu ? nothing : refine_apply_fused_kernel!(backend)
+        for b in 2:length(offs)
+            m_lo = offs[b - 1] - prob.n0 + 1
+            len = offs[b] - offs[b - 1]
+            len <= 0 && continue
+            if cpu
+                _native_refine_apply_fused!(values, prob, xi, m_lo, len, Val(K), Val(D))
+            else
+                fused(values, prob.coords, prob.neighbors, xi, prob.n0, m_lo, prob.scale,
+                    prob.bins, prob.vals, nbins(prob), Val(K), Val(D);
+                    ndrange = len, workgroupsize = wgs)
+            end
         end
-    elseif cpu
-        _native_refine_meanvec_std!(mean_vec, std, prob, Val(K), Val(D))
-    else
-        refine_meanvec_std_kernel!(backend)(mean_vec, std, prob.coords, prob.neighbors, prob.n0,
-            prob.scale, prob.bins, prob.vals, nbins(prob), Val(K), Val(D);
-            ndrange = M, workgroupsize = wgs)
+        cpu || KernelAbstractions.synchronize(backend)
+        return values
     end
 
-    # Sequential sweep over depth batches. On the GPU these launches share one stream, so batch
-    # b+1 already waits for batch b (and for the mean/std kernel above) by stream ordering — a
-    # per-batch host `synchronize` only adds a CPU↔GPU round-trip per batch (the bottleneck for
-    # the full `generate` forward). Launch all batches back-to-back; synchronize once at the end.
+    # ANISOTROPIC: keep the two-pass form (materialise mean/std, then the per-batch apply).
+    cov = prob.cov
+    mean_vec = KernelAbstractions.zeros(backend, T, K, M)
+    std = KernelAbstractions.zeros(backend, T, M)
+    if cpu
+        _native_refine_meanvec_std_aniso!(mean_vec, std, prob, Val(K), Val(D))
+    else
+        refine_meanvec_std_kernel_aniso!(backend)(mean_vec, std, prob.coords, prob.neighbors,
+            prob.n0, prob.scale, cov.spatial_bins, cov.z_bins, cov.grid, T(cov.alpha),
+            Val(K), Val(D); ndrange = M, workgroupsize = wgs)
+    end
     apply = cpu ? nothing : refine_apply_kernel!(backend)
-    offs = prob.offsets                      # 0-based exclusive batch ends; offs[1] == n0
     for b in 2:length(offs)
-        m_lo = offs[b - 1] - prob.n0 + 1     # first refined column (1-based) in this batch
+        m_lo = offs[b - 1] - prob.n0 + 1
         len = offs[b] - offs[b - 1]
         len <= 0 && continue
         if cpu

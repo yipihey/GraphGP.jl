@@ -446,6 +446,33 @@ end
     end
 end
 
+# FUSED reverse apply (per depth batch): recomputes the per-point conditional-mean weights / std
+# inline (assemble/factorize/solve) instead of reading a materialised `mean_vec` (K×M). Saves
+# ~K·4 B/pt of device memory in generate_grad_xi — the d/dxi adjoint's dominant transient — with
+# no separate full-M mean/std pass. Same answer as refine_reverse_apply_kernel!.
+@kernel function refine_reverse_apply_fused_kernel!(xg, vb, @Const(coords), @Const(neighbors),
+        n0, m_lo, scale::T, @Const(bins), @Const(vals), nbins, ::Val{K}, ::Val{D}) where {T, K, D}
+    t = @index(Global)
+    m = m_lo + t - 1
+    A = @private T (K + 1, K + 1)
+    jc = @private UInt32 (K + 1, D)
+    mv = @private T (K,)
+    _gather_joint!(jc, coords, neighbors, m, n0, Val(K), Val(D))
+    assemble_cov!(A, jc, Val(K + 1), Val(D), scale, bins, vals, nbins)
+    chol_lower!(A, Val(K + 1))
+    mean_vec_solve!(mv, A, Val(K))
+    @inbounds begin
+        p = n0 + m
+        vbp = vb[p]
+        xg[p] = A[K + 1, K + 1] * vbp
+        for j in 1:K
+            nbj = neighbors[j, m]
+            nbj > 0 || continue
+            Atomix.@atomic vb[nbj] += mv[j] * vbp
+        end
+    end
+end
+
 # On-device reverse depth-batch sweep for generate_grad_vals (d/dcov_vals of the forward field),
 # one depth batch. The transpose of the forward apply combined with the per-point Cholesky-vals
 # backward: for each refined point p in the batch (vb[p] already finalised by later batches),

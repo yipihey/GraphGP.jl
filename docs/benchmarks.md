@@ -104,9 +104,27 @@ so all three are a genuine head-to-head. A6000 (44 GB usable), K=8, D=3, Float32
 
 At every scale GraphGP.jl **wins both derivatives** — d/dxi by ~1.4–1.6× and d/dcov_vals by ~1.4–1.6×
 — while the extension wins the forward `generate` by ~1.2–1.3× (it fuses the sequential depth-batch
-apply tighter).
+apply tighter). The forward `generate`, d/dxi, and d/dcov_vals now use the same **fused** per-batch
+form as the extension (assemble → factorise → solve → apply inline; no materialised `mean_vec`); at
+GPU-fill scale this is at-parity in speed with the previous two-pass form (≤1 % at 80 M / 160 M) and
+~10 % slower only at low N (≤40 M), where the small early depth-batches underfill the GPU.
 
-**At GPU-fill (240 M, 0.7 GB free), GraphGP.jl computes the full forward + both derivatives, but the
+**Footprint (per-point transient, measured at 40 M).** Fusing the mean/std computation into each
+per-batch apply removes the materialised conditional-mean weights `mean_vec` (K×M = 32 B/pt at K=8)
+plus `std`, roughly **halving every op's transient**:
+
+| op | before (2-pass) | after (fused) |
+| --- | --- | --- |
+| forward `generate` | 2.61 GiB (65 B/pt) | **1.27 GiB (29 B/pt)** |
+| d/dxi | 2.76 GiB (69 B/pt) | **1.42 GiB (35 B/pt)** |
+| d/dcov_vals | 2.76 GiB (69 B/pt) | **1.42 GiB (35 B/pt)** |
+
+The persistent graph (`prob`) is 44 B/pt (coords UInt32 + Int32 neighbours at K=8); the working set
+during any op is now `prob + ~35 B/pt` (was `prob + ~69 B/pt`), so the peak drops from ~113 to
+~79 B/pt — a **~1.4× higher GPU-fill ceiling** for the gradient workflow (projected ~330 M on a free
+44 GB A6000; an exact at-ceiling re-measurement is pending an uncontended GPU).
+
+**At GPU-fill, GraphGP.jl computes the full forward + both derivatives, but the
 extension's combined run OOMs on the derivatives.** † A *single* extension derivative fits at 240 M
 in isolation, but running forward + d/dxi + d/dcov_vals in one process accumulates memory (jax.grad
 materialises autodiff tapes) and OOMs; GraphGP.jl's **tape-free analytic adjoints** reuse buffers, so

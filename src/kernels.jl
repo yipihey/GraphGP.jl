@@ -92,3 +92,28 @@ end
         values[n0 + m] = acc + std[m] * xi[m]
     end
 end
+
+# FUSED forward apply (per depth batch): assemble the per-point (k+1) covariance, factorize, solve
+# for the conditional-mean weights, and apply — all inline, so the full `mean_vec` (K×M) is never
+# materialised (saves ~K·4 B/pt of device memory) and the separate full-M mean/std pass is dropped
+# (one fused pass instead of two — like the CUDA extension's forward). Same answer as the
+# meanvec_std + apply pair. Run one batch at a time (`m_lo .. m_lo+ndrange-1`).
+@kernel function refine_apply_fused_kernel!(values, @Const(coords), @Const(neighbors), @Const(xi),
+        n0, m_lo, scale::T, @Const(bins), @Const(vals), nbins, ::Val{K}, ::Val{D}) where {T, K, D}
+    t = @index(Global)
+    m = m_lo + t - 1
+    A = @private T (K + 1, K + 1)
+    jc = @private UInt32 (K + 1, D)
+    mv = @private T (K,)
+    _gather_joint!(jc, coords, neighbors, m, n0, Val(K), Val(D))
+    assemble_cov!(A, jc, Val(K + 1), Val(D), scale, bins, vals, nbins)
+    chol_lower!(A, Val(K + 1))
+    mean_vec_solve!(mv, A, Val(K))
+    @inbounds begin
+        acc = A[K + 1, K + 1] * xi[m]            # std * xi
+        for j in 1:K
+            acc += mv[j] * values[neighbors[j, m]]
+        end
+        values[n0 + m] = acc
+    end
+end

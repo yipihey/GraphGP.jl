@@ -81,6 +81,36 @@ function _native_refine_meanvec_std!(mean_vec, std, prob::GraphGPProblem{T}, ::V
     return nothing
 end
 
+# FUSED forward apply for one depth batch (no materialised mean_vec): assemble + factorize + solve
+# + apply per point, threaded over the batch. Mirrors refine_apply_fused_kernel! on the GPU.
+function _native_refine_apply_fused!(values, prob::GraphGPProblem{T}, xi, m_lo::Int, len::Int,
+        ::Val{K}, ::Val{D}) where {T, K, D}
+    coords = prob.coords; neighbors = prob.neighbors; n0 = prob.n0
+    scale = prob.scale; bins = prob.bins; vals = prob.vals; nb = nbins(prob)
+    nt = Threads.nthreads()
+    chunk = cld(len, nt)
+    Threads.@threads :static for t in 1:nt
+        A = Matrix{T}(undef, K + 1, K + 1)
+        jc = Matrix{UInt32}(undef, K + 1, D)
+        mv = Vector{T}(undef, K)
+        lo = (t - 1) * chunk + 1
+        hi = min(t * chunk, len)
+        @inbounds for tt in lo:hi
+            m = m_lo + tt - 1
+            _gather_joint!(jc, coords, neighbors, m, n0, Val(K), Val(D))
+            assemble_cov!(A, jc, Val(K + 1), Val(D), scale, bins, vals, nb)
+            chol_lower!(A, Val(K + 1))
+            mean_vec_solve!(mv, A, Val(K))
+            acc = A[K + 1, K + 1] * xi[m]
+            for j in 1:K
+                acc += mv[j] * values[neighbors[j, m]]
+            end
+            values[n0 + m] = acc
+        end
+    end
+    return nothing
+end
+
 # Step 2 of forward generation for one depth batch: fully parallel over the batch's points.
 function _native_refine_apply!(values, mean_vec, std, neighbors, xi, n0::Int, m_lo::Int,
         len::Int, ::Val{K}) where {K}
