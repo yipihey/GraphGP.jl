@@ -29,8 +29,10 @@ science carry no more); correctness is cross-checked in Float64 where it clarifi
 - **Differentiation is also portable + analytically composable.** The same analytic adjoints (xi,
   cov_vals, log-det, inverse-loss, point positions) compose through Julia's ChainRules/Zygote and
   run on CPU **and** GPU — a surface the GPU-only extension does not fully cover (§4).
-- **CPU.** A native multithreaded CPU path (the same fused kernel) reaches ~20 M pts/s — the CUDA
-  extension is GPU-only, so this is GraphGP.jl's CPU story, not a head-to-head.
+- **CPU: dramatically faster than pure-JAX.** On the same 64 cores and the same graph, GraphGP.jl
+  beats pure-JAX-CPU by **46–84×** on the per-point ops and **16–23×** on `build_graph` (§5) — the
+  fused per-point kernel avoids JAX's `(M,k+1,k+1)` materialisation and scales near-linearly with
+  cores. The whole pipeline runs on CPU with no Python/CUDA dependency.
 - **Robust.** Coincident / lattice-collision points (real catalogues) stay finite on the GPU and
   agree with the CPU; degenerate blocks contribute a regularised, near-zero-information
   conditional instead of NaN.
@@ -143,20 +145,35 @@ extension at 1 M** (§3), competitive-to-faster at 10 M (wins d/dxi, trails d/dc
 available on CPU too and composable with Julia AD. The pure-JAX inverse pass differentiates `xi`
 but not yet `cov_vals`.
 
-## 5. CPU path (native multithreaded + NUMA)
+## 5. CPU path — GraphGP.jl (multithreaded) vs JAX (CPU)
 
 The same fused kernel runs on the CPU backend via a native `@threads` path (the KernelAbstractions
-CPU backend is 5–13× slower; bypassed). EPYC 7763, 2 M points, K=10, Float32, `pinthreads(:numa)`
-(round-robin across the 16 NUMA nodes — +35–59% on the gradient over unpinned). Throughput in
-M points·s⁻¹:
+CPU backend is 5–13× slower; bypassed). Apples-to-apples vs pure-JAX on **one shared graph**,
+2-socket EPYC 7763, **2 M points, K=10, D=3, Float32**, both confined to the **same 64 cores**
+(`taskset -c 0-63`). Per-point throughput in M points·s⁻¹ (higher is better):
 
-| threads | refine_logdet | refine_inv | grad (cov_vals) |
+| op | jax-cpu (64) | GraphGP.jl (64) | GraphGP.jl (128) | speedup vs JAX (64c) |
+| --- | --- | --- | --- | --- |
+| `refine_logdet` | 0.25 | **11.7** | **16.2** | **46×** |
+| `refine_inv` | 0.13 | **10.6** | 11.0 | **84×** |
+| grad (∂logdet/∂cov_vals) | 0.11 | **6.0** | 10.6 | **57×** |
+
+The gap is structural, not tuning: pure-JAX materialises the full `(M, k+1, k+1)` tensor and calls a
+batched Cholesky (memory-bound, poorly multithreaded on CPU — it scales only ~5× across cores),
+whereas GraphGP.jl keeps each `(k+1)²` block in registers in a fused per-point kernel and scales
+near-linearly with cores. (Same answer to f64 round-off — see §1.)
+
+**Graph build (CPU), `build_graph` vs JAX `gp.build_graph`** (steady-state, excludes JAX JIT
+compile), seconds (lower is better):
+
+| N | jax-cpu | GraphGP.jl (128 threads) | speedup |
 | --- | --- | --- | --- |
-| 64 | 12.8 | 12.6 | 6.4 |
-| 128 | 20.4 | 20.1 | 13.1 |
+| 1 M | 41.1 s | **2.5 s** | 16× |
+| 2 M | 79.6 s | **3.5 s** | 23× |
 
-This is the only fused CPU implementation of the core; it lets the whole pipeline (build → refine
-→ gradients) run on CPU with no Python or CUDA dependency. (The CUDA extension is GPU-only.)
+The Julia build is parallelized (threaded per-level passes + a parallel merge-sort) and is
+**byte-identical** to `gp.build_graph` (§7). This is the only fused CPU implementation of the core;
+the whole pipeline (build → refine → gradients) runs on CPU with no Python/CUDA dependency.
 
 ## 6. Robustness — degenerate / coincident points
 
