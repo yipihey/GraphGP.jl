@@ -144,6 +144,31 @@ memory) — a substantially more complex kernel with a modest expected ceiling. 
 the KA path as the production GPU path; revisit multi-point-per-warp only if profiling on the real
 science workload shows the per-point kernel is the wall-clock bottleneck.
 
+## Host-side audit (graph build) — a 12× quick win
+
+A second audit covered the rest of the package (host orchestration, graph build, gradients). Stage
+breakdown of `build_graph` (CPU, 500k, D=3, k=10): **`build_tree_special` was 90% of the time and
+allocated ~16 GB**; `query_preceding_neighbors_special` 10%; everything else (`compute_depths`,
+`order_by_depth`, `quantize`) <0.2%.
+
+**Root cause (type-unstable closure).** The per-level sort comparator captured `nodes`/`pad`, but
+`nodes` was *reassigned* each level (`nodes = nodes[p]`; `nodes = newnodes`) → Julia boxed it
+(`Core.Box`) → every one of the billions of sort comparisons was type-unstable and heap-allocating.
+16 GB of garbage, ~90% of build time.
+
+**Fix.** Captured variables (`nodes`, `pad`) are assigned once and only mutated in place (scratch +
+`copyto!`, never rebound); non-captured `pts`/`indices` are double-buffered by swapping instead of
+`pts[p,:]` slicing; the sort uses `QuickSort` (total-order comparator, no temp buffer). The M
+preceding-neighbour queries (independent, read-only traversal, disjoint output columns) are threaded.
+
+**Result.** `build_graph` 30.8 s → 1.94 s @500k; 74 s → 12.1 s (1 thread) → **6.1 s (16 threads) =
+12×** @1M; allocations 16 GB → 0.22 GB. Byte-identity to Python's `gp.build_graph` preserved
+(0/22976 neighbour mismatches). The remaining build cost is the inherent per-level `sort` in
+`build_tree_special` (serial); the smaller leftovers the audit flagged (`quantize` broadcasts,
+`order_by_depth` slicing, `_compute_offsets` `push!`, scheme-B `Set`/`Dict`) are each <1% now and not
+worth chasing. The GPU forward/gradient depth-batch sweeps are already on-device with a single sync;
+their sequential-across-batches structure is intrinsic to Vecchia and not parallelizable.
+
 ## Method notes / caveats
 - No `ncu`/`nsys` here, so achieved occupancy, DRAM throughput %, and stall reasons are inferred, not
   directly measured. Installing Nsight Compute would let us confirm the local-memory (LSU) and
