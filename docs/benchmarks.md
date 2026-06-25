@@ -248,7 +248,14 @@ julia --project=bench bench/compare/run_gradmem.jl 200000 8  # GraphGP.jl side
 # build_graph byte-identity vs Python's pure-JAX gp.build_graph (needs jax + graphgp)
 # python -c "...gp.build_graph(pts,n0=128,k=8); np.savez(...)"  then compare in Julia (see §7)
 
-# CPU throughput (NUMA-pinned)
+# §5 CPU vs JAX — per-point ops on ONE shared graph (correctness + throughput), matched cores.
+# Portable: set PY to a jax+graphgp python; CORES/NTHREADS to your machine. GPU=off for CPU-only.
+PY=/path/to/jax-python GPU=off ./bench/compare/run_all.sh 2000000 10 3 64   # prints results/report.md
+
+# §5 CPU vs JAX — build_graph wall-time (GraphGP.jl parallel vs gp.build_graph), matched cores.
+PY=/path/to/jax-python ./bench/compare/run_build_compare.sh 1000000 10 3 64
+
+# CPU throughput (NUMA-pinned, GraphGP.jl only)
 julia -t 128 --project=bench test/bench_cpu_pin.jl numa 2000000
 
 # correctness: full suite (CPU + auto GPU testset) + opt-in Python parity

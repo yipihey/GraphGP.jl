@@ -49,12 +49,25 @@ Environment knobs (see top of `run_all.sh`): `PY` (python with jax+graphgp), `JL
 Julia are confined to the same cores via `taskset`, and JAX's OpenBLAS/OMP thread count is
 capped to the core budget, so the CPU comparison is fair under machine load.
 
+## CPU vs JAX, portable to any machine
+
+```bash
+# per-point ops (refine_logdet / refine_inv / grad), correctness + throughput, matched cores:
+PY=/path/to/jax-python GPU=off ./run_all.sh 2000000 10 3 64     # -> results/report.md
+# build_graph wall-time, GraphGP.jl (parallel) vs JAX gp.build_graph, matched cores:
+PY=/path/to/jax-python ./run_build_compare.sh 1000000 10 3 64
+```
+Both confine every process to the same cores with `taskset` (knob `CORES`) and the same thread
+budget (last arg, default `nproc`), reading `PY`/`JL`/`PROJ` from the environment — no hardcoded
+paths, so they run as-is on other hardware.
+
 ## Pieces
 
 - `dump_graph.py` — build one graph, dump `results/graph.npz`.
 - `run_jax.py <graph> <correctness|timing> <jax|cuda> <outdir>` — one JAX path; device via
   `JAX_PLATFORMS`.
 - `run_julia.jl <graph> <correctness|timing> <cpu|gpu> <outdir>` — one GraphGP.jl path.
+- `build_bench.py` / `build_bench.jl` — time `build_graph` on each side (used by `run_build_compare.sh`).
 - `report.py <outdir>` — aggregate the `*.npz` outputs + `timings.jsonl` into Markdown.
 
 ## Real ECHOES graphs
