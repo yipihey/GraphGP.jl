@@ -53,23 +53,31 @@ per-point terms naively in Float32; GraphGP.jl's reduction is more accurate (2.4
 
 ## Throughput (Float32, M points/s; higher is better)
 
-N = 2 M, K = 10, D = 3. CPU paths confined to the **same 64 cores** (pure-JAX with OpenBLAS/OMP
-capped to 64); GPU paths on 1× A6000.
+N = 2 M, K = 10, D = 3 (one `run_all.sh` capture). CPU paths on the **same 64 cores** (pure-JAX with
+OpenBLAS/OMP capped to 64); GPU on 1× A6000.
+
+> **Canonical numbers live in [`docs/benchmarks.md`](benchmarks.md).** N = 2 M is **below target
+> scale**: on GPU it is the launch-overhead regime, so the GPU rows here are noisy and run-to-run
+> variable — see benchmarks.md §2 for the at-scale (10 M–240 M, GPU-fill) forward + derivative
+> comparison, which is the operating point that matters. The CPU rows below also vary run-to-run
+> (NUMA/load; julia-cpu refine_logdet measured ~12–19 M/s across runs); the robust claim is the
+> order-of-magnitude CPU win over pure-JAX, not the exact value.
 
 | path | refine_logdet | refine_inv | grad (∂cov_vals) |
 | --- | --- | --- | --- |
 | `jax-cpu` (pure JAX, 64 cores) | 0.2 | 0.1 | 0.1 |
-| `julia-cpu` (GraphGP.jl, 64 cores) | **12.8** | **12.6** | **6.4** |
-| `jax-gpu` (pure JAX) | 8.6 | 7.7 | <0.05 |
-| `cuda-gpu` (graphgp CUDA ext) | 128.1 | 115.5 | n/a (no log-det-grad rule) |
-| `julia-gpu` (GraphGP.jl) | **201.3** | **156.5** | **45.4** |
+| `julia-cpu` (GraphGP.jl, 64 cores) | **19.3** | **18.4** | **9.6** |
+| `jax-gpu` (pure JAX) | 8.6 | 7.8 | <0.05 |
+| `cuda-gpu` (graphgp CUDA ext) | 132.2 | 118.9 | n/a (no log-det-grad rule) |
+| `julia-gpu` (GraphGP.jl) | 123.1 | 109.4 | **30.2** |
 
-At matched cores, GraphGP.jl-CPU is **~64×** (logdet) to **~126×** (inv) faster than pure-JAX-CPU.
-On GPU it is ~1.4–1.6× ahead of the CUDA extension *at this N* (still the launch-overhead
-regime — see below) and ~23× over pure-JAX-GPU, while also producing the log-det gradient (`grad`
-column) fast: the CUDA extension has no rule for it (`NotImplementedError`), and pure-JAX-GPU can
-but only at <0.05 M/s. (The CUDA extension *does* differentiate the forward `generate` w.r.t. `xi`
-and `cov_vals` on-GPU — that surface is benchmarked in `docs/benchmarks.md` §3.)
+At matched cores GraphGP.jl-CPU is **~50–180×** faster than pure-JAX-CPU (the structural story below).
+On GPU at this small N it is at parity with the CUDA extension (both launch-bound; at the 10 M–240 M
+target scale GraphGP.jl wins both *forward-pass derivatives* and trails the extension only on forward
+`generate` — see benchmarks.md §2) and ~14× over pure-JAX-GPU, while also producing the **log-det
+gradient** fast: the CUDA extension has no rule for it (`NotImplementedError`), pure-JAX-GPU can but
+at <0.05 M/s. (The CUDA extension *does* differentiate the forward `generate` w.r.t. `xi` and
+`cov_vals` on-GPU — that surface is benchmarked in benchmarks.md §2–§3.)
 
 Two regimes worth separating:
 

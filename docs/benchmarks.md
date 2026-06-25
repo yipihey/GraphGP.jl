@@ -163,11 +163,15 @@ CPU backend is 5–13× slower; bypassed). Apples-to-apples vs pure-JAX on **one
 2-socket EPYC 7763, **2 M points, K=10, D=3, Float32**, both confined to the **same 64 cores**
 (`taskset -c 0-63`). Per-point throughput in M points·s⁻¹ (higher is better):
 
-| op | jax-cpu (64) | GraphGP.jl (64) | GraphGP.jl (128) | speedup vs JAX (64c) |
-| --- | --- | --- | --- | --- |
-| `refine_logdet` | 0.25 | **11.7** | **16.2** | **46×** |
-| `refine_inv` | 0.13 | **10.6** | 11.0 | **84×** |
-| grad (∂logdet/∂cov_vals) | 0.11 | **6.0** | 10.6 | **57×** |
+| op | jax-cpu (64) | GraphGP.jl (64) | speedup vs JAX |
+| --- | --- | --- | --- |
+| `refine_logdet` | 0.2 | **13–19** | ~65–95× |
+| `refine_inv` | 0.1 | **12–18** | ~120–180× |
+| grad (∂logdet/∂cov_vals) | 0.1 | **6.5–9.6** | ~65–95× |
+
+GraphGP.jl-CPU throughput at this N has **run-to-run variance** (NUMA placement + machine load give
+~13–19 M/s for `refine_logdet` @64 cores across runs); the robust result is the order-of-magnitude
+win over pure-JAX. 128 cores adds ~1.3–1.5× more. Reproduce with `bench/compare/run_all.sh`.
 
 The gap is structural, not tuning: pure-JAX materialises the full `(M, k+1, k+1)` tensor and calls a
 batched Cholesky (memory-bound, poorly multithreaded on CPU — it scales only ~5× across cores),

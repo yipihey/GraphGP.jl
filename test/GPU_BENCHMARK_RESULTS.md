@@ -1,5 +1,11 @@
 # GraphGP.jl (CUDA) vs JAX vs custom graphgp-cuda extension — GPU benchmark
 
+> **Historical sweep.** The **canonical, current numbers are in
+> [`docs/benchmarks.md`](../docs/benchmarks.md)** — including the at-scale (10 M–240 M, GPU-fill)
+> forward + derivative head-to-head and the corrected CUDA-extension gradient framing (the
+> extension differentiates the forward `generate`; it has no `refine_logdet`/`refine_inv` rule).
+> This file is a fuller earlier 0.2 M–20 M sweep kept for reference.
+
 **Hardware:** NVIDIA RTX A6000 (sm_86, 45 GiB), CUDA driver 13.3
 **Software:**
 - Julia 1.12.6 + CUDA.jl (CUDA_Runtime 13.5, KernelAbstractions 0.9.41)
