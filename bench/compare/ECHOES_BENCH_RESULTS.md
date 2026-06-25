@@ -28,9 +28,10 @@ L2-relative difference of logdet / xi / grad(cov_vals).
 | local | 1,400,000 | `julia-cpu` | 1.1e-16 | 2.4e-14 | 2.1e-13 |
 | local | 1,400,000 | `cuda-gpu` | 1.6e-05 | 1.3e-05 | n/a |
 
-**Julia-CPU reproduces the JAX reference to f64 machine precision everywhere**, and is the only GPU-
-capable backend that also returns the gradient (the CUDA extension has no autodiff). The CUDA
-extension agrees to its f32 precision (1e-4…1e-6).
+**Julia-CPU reproduces the JAX reference to f64 machine precision everywhere**, and is the only
+GPU-capable backend that also returns the **log-det / inverse-loss** gradient (the CUDA extension
+differentiates the forward `generate` but has no rule for those ops, `NotImplementedError`). The
+CUDA extension agrees to its f32 precision (1e-4…1e-6).
 
 **Robustness note (local 70k).** The real 2M++ catalog has **23 coincident lattice positions** (group
 members at near-identical sky/redshift). Those duplicate rows make the dense first-block covariance

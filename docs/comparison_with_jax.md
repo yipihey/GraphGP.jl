@@ -12,10 +12,12 @@ AMD EPYC 7763 (128 cores, 16 NUMA nodes) + 1× NVIDIA RTX A6000.
 - **Same answer.** On an identical graph, GraphGP.jl reproduces the JAX reference to **~1e-13**
   on CPU (Float64) and **~1e-5** on GPU (Float32 / fast-math) — the latter being the same
   agreement level as `graphgp`'s own CUDA extension.
-- **GPU: parity + autodiff.** GraphGP.jl matches the hand-written CUDA extension at scale, and
-  is faster at small/medium N (the extension is launch-overhead-bound there). Unlike the CUDA
-  extension, GraphGP.jl provides analytic gradients (∂/∂cov_vals, ∂/∂hyperparameters, ∂/∂xi,
-  ∂/∂points) on both CPU and GPU.
+- **GPU: parity + a fuller gradient surface.** GraphGP.jl matches the hand-written CUDA extension
+  at scale, and is faster at small/medium N (the extension is launch-overhead-bound there). The
+  CUDA extension differentiates the forward `generate` w.r.t. `xi` and `cov_vals` (on-GPU, fast),
+  but has **no gradient rule for the `refine_logdet` / `refine_inv` ops** (`NotImplementedError`).
+  GraphGP.jl provides both the forward-generate derivatives **and** the analytic log-det /
+  inverse-loss / hyperparameter / point-position gradients, on CPU and GPU.
 - **CPU: a large speedup over pure JAX.** GraphGP.jl is roughly **5× faster per core** and
   **~12–15× better-scaling across cores**, for ~**50–90×** end-to-end on a fully-utilised host.
   This is structural, not a tuning artefact (analysis below).
@@ -40,7 +42,7 @@ AMD EPYC 7763 (128 cores, 16 NUMA nodes) + 1× NVIDIA RTX A6000.
 | --- | --- | --- | --- |
 | `jax-gpu` (pure JAX) | 0 | 1.3e-13 | 4.1e-15 |
 | `julia-cpu` | 0 | 1.7e-13 | 9.3e-14 |
-| `cuda-gpu` (CUDA ext, f32) | 1.1e-2 | 8.4e-5 | n/a (no autodiff) |
+| `cuda-gpu` (CUDA ext, f32) | 1.1e-2 | 8.4e-5 | n/a (no log-det-grad rule) |
 | `julia-gpu` (f32/fast-math) | 2.4e-6 | 5.8e-5 | 2.3e-5 |
 
 The CPU/Float64 paths are identical to round-off (~1e-13). The GPU paths agree on `xi` to
@@ -59,13 +61,15 @@ capped to 64); GPU paths on 1× A6000.
 | `jax-cpu` (pure JAX, 64 cores) | 0.2 | 0.1 | 0.1 |
 | `julia-cpu` (GraphGP.jl, 64 cores) | **12.8** | **12.6** | **6.4** |
 | `jax-gpu` (pure JAX) | 8.6 | 7.7 | <0.05 |
-| `cuda-gpu` (graphgp CUDA ext) | 128.1 | 115.5 | n/a (no autodiff) |
+| `cuda-gpu` (graphgp CUDA ext) | 128.1 | 115.5 | n/a (no log-det-grad rule) |
 | `julia-gpu` (GraphGP.jl) | **201.3** | **156.5** | **45.4** |
 
 At matched cores, GraphGP.jl-CPU is **~64×** (logdet) to **~126×** (inv) faster than pure-JAX-CPU.
 On GPU it is ~1.4–1.6× ahead of the CUDA extension *at this N* (still the launch-overhead
-regime — see below) and ~23× over pure-JAX-GPU, while also providing the gradient (`grad` column)
-that neither GPU alternative offers.
+regime — see below) and ~23× over pure-JAX-GPU, while also producing the log-det gradient (`grad`
+column) fast: the CUDA extension has no rule for it (`NotImplementedError`), and pure-JAX-GPU can
+but only at <0.05 M/s. (The CUDA extension *does* differentiate the forward `generate` w.r.t. `xi`
+and `cov_vals` on-GPU — that surface is benchmarked in `docs/benchmarks.md` §3.)
 
 Two regimes worth separating:
 
@@ -107,8 +111,8 @@ We verified this is not a configuration miss:
 - The `jnp.linalg.cholesky` floor (~0.6 M/s) is independent of the surrounding code.
 
 Closing the gap in JAX would require a hand-written custom kernel (Pallas / CUDA) — which is
-exactly what the `graphgp` CUDA extension *is*, and that extension is GPU-only and has no
-autodiff. GraphGP.jl provides the fused-kernel approach as a single portable implementation that
+exactly what the `graphgp` CUDA extension *is*, and that extension is GPU-only and — though it differentiates the forward generate —
+has no log-det/inverse-loss gradient rule. GraphGP.jl provides the fused-kernel approach as a single portable implementation that
 runs on CPU **and** GPU **and** differentiates.
 
 ## What's new in the Julia port (map)
@@ -121,7 +125,9 @@ Python or C++ dependency — built on KernelAbstractions so one kernel set runs 
   materialises the batch) + [`src/linalg.jl`](../src/linalg.jl) (the per-point Cholesky / solve
   primitives). The CPU backend dispatches to a native threaded path,
   [`src/cpu_native.jl`](../src/cpu_native.jl) (the KA CPU backend is 5–13× slower; see below).
-- **Analytic gradients the CUDA extension lacks.** [`src/kernels_adjoint.jl`](../src/kernels_adjoint.jl),
+- **Analytic gradients, including the ones the CUDA extension lacks** (log-det / inverse-loss /
+  hyperparameter / point-position; the extension only differentiates the forward `generate`).
+  [`src/kernels_adjoint.jl`](../src/kernels_adjoint.jl),
   [`src/grad.jl`](../src/grad.jl) — reverse-mode Cholesky pullback for ∂/∂cov_vals, plus
   ∂/∂hyperparameters, ∂/∂xi, and ∂/∂points (positions treated as continuous), CPU **and** GPU.
   [`src/chainrules.jl`](../src/chainrules.jl) exposes them as ChainRules `rrule`s so Zygote

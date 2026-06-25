@@ -30,7 +30,9 @@ Headline, on one **identical** graph, RTX A6000, Float32 (lower is better):
 - **Same answer.** Reproduces the JAX reference element-wise: ~1e-13 (Float64), ~1e-5 (Float32 GPU).
 - **`build_graph` is byte-identical to Python's** `gp.build_graph` (permutation, neighbors, offsets).
 - **Faster than the hand-written CUDA extension at 1 M** on all three (2–2.4×); competitive at 10 M
-  (wins ∂/∂xi). The CUDA extension has **no autodiff**; GraphGP.jl differentiates on CPU *and* GPU.
+  (wins ∂/∂xi). The CUDA extension differentiates the forward `generate` w.r.t. `xi` and `cov_vals`
+  (on-GPU, fast — the numbers above) but has **no gradient rule for the log-det / inverse-loss ops**
+  (`NotImplementedError`); GraphGP.jl provides those too, analytically, on CPU **and** GPU.
 - **CPU:** the same fused kernel does ~20 M points/s multithreaded — the CUDA extension is GPU-only.
 
 ## Install

@@ -50,7 +50,7 @@ if ref_label:
             gr, ga = reldiff(o["grad_logdet_vals"], ref["grad_logdet_vals"])
             gcell = f"{gr:.1e}, {ga:.1e}"
         else:
-            gcell = "n/a (no autodiff)"
+            gcell = "n/a (no log-det-grad rule)"
         tag = "  *(ref)*" if label == ref_label else ""
         print(f"| `{label}`{tag} | {ld_r:.1e} | {xr:.1e}, {xa:.1e} | {gcell} |")
 print()

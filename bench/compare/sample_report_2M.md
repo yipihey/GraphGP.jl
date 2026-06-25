@@ -7,7 +7,7 @@ Reference: `jax-cpu`. L2-norm relative / max-absolute difference vs reference:
 
 | path | logdet (rel) | xi (rel, abs) | grad cov_vals (rel, abs) |
 | --- | --- | --- | --- |
-| `cuda-gpu` | 1.1e-02 | 8.4e-05, 2.2e-02 | n/a (no autodiff) |
+| `cuda-gpu` | 1.1e-02 | 8.4e-05, 2.2e-02 | n/a (no log-det-grad rule) |
 | `jax-cpu`  *(ref)* | 0.0e+00 | 0.0e+00, 0.0e+00 | 0.0e+00, 0.0e+00 |
 | `jax-gpu` | 0.0e+00 | 1.3e-13, 3.3e-11 | 4.1e-15, 3.5e-06 |
 | `julia-cpu` | 0.0e+00 | 1.7e-13, 4.4e-11 | 9.3e-14, 8.3e-05 |

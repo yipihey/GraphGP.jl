@@ -15,13 +15,15 @@ input. The harness reports two things, in this order:
 | --- | --- | --- | --- |
 | `jax-cpu`  | pure-JAX `graphgp` (`cuda=False`) | CPU | yes |
 | `jax-gpu`  | pure-JAX `graphgp` (`cuda=False`) | GPU | yes |
-| `cuda-gpu` | `graphgp` CUDA extension (`cuda=True`) | GPU | **no** |
+| `cuda-gpu` | `graphgp` CUDA extension (`cuda=True`) | GPU | fwd only |
 | `julia-cpu`| GraphGP.jl, CPU backend | CPU | yes |
 | `julia-gpu`| GraphGP.jl, CUDA backend | GPU | yes |
 
 The pure-JAX path materialises the full `(M, k+1, k+1)` covariance tensor and calls a batched
 `cholesky`; GraphGP.jl and the CUDA extension use a fused per-point kernel that never
-materialises it. The CUDA extension has no differentiation rule (`jax.grad` is unavailable).
+materialises it. The CUDA extension **does** differentiate the forward `generate` (w.r.t. `xi`
+and `cov_vals`), but has **no** gradient rule for the `refine_logdet`/`refine_inv` ops this
+harness times (`NotImplementedError`), so its grad column is `n/a`.
 
 ## Prerequisites
 

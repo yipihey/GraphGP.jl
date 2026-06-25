@@ -4,7 +4,9 @@ timings. Device is chosen by JAX_PLATFORMS (cpu/gpu) in the environment.
     python run_jax.py <graph.npz> <correctness|timing> <jax|cuda> <outdir>
 
   jax  : pure-JAX path  (refine_*(..., cuda=False)) -- materialises (M,k+1,k+1), has autodiff
-  cuda : graphgp CUDA extension (cuda=True), GPU only, f32, no autodiff
+  cuda : graphgp CUDA extension (cuda=True), GPU only, f32; differentiates the forward generate
+         (xi, cov_vals) but has no gradient rule for refine_logdet/refine_inv (NotImplementedError),
+         so the grad column this harness times (d/dvals of logdet) is n/a for it
 
 correctness mode runs f64 and writes <outdir>/<label>.npz with logdet/xi/grad for the
 element-wise cross-check; timing mode runs f32 (the production precision) and prints one JSON
@@ -58,7 +60,9 @@ if mode == "correctness":
     logdet = float(block(logdet_of(vals)))
     xi = np.asarray(block(gp.refine_inv(points, neighbors, offsets, cov, values, cuda=CU)[1]))
     rec = dict(logdet=np.float64(logdet), xi=xi.astype(np.float64))
-    if not CU:                                            # CUDA ext has no autodiff rule
+    # CUDA ext differentiates the forward generate but has no refine_logdet grad rule, so only the
+    # pure-JAX path records the log-det gradient here.
+    if not CU:
         grad = np.asarray(block(jax.grad(lambda v: logdet_of(v))(vals)))
         rec["grad_logdet_vals"] = grad.astype(np.float64)
     np.savez(f"{outdir}/{label}.npz", **rec)

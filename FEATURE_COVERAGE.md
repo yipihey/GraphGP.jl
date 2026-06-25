@@ -55,7 +55,7 @@ functions.
 | | Python `graphgp` | GraphGP.jl |
 | --- | --- | --- |
 | Mechanism | generic JAX autodiff (no custom primitives) | hand-written analytic adjoints |
-| Backends for grad | JAX CPU/GPU; **none in the `cuda=True` extension** (`NotImplementedError`) | CPU (threaded, privatized) **and** GPU (atomic scatter); plus a fused logdet+grad GPU kernel |
+| Backends for grad | JAX CPU/GPU; the `cuda=True` extension differentiates the forward `generate` (xi, cov_vals) but **not** `refine_logdet`/`refine_inv` (`NotImplementedError`) | CPU (threaded, privatized) **and** GPU (atomic scatter); plus a fused logdet+grad GPU kernel |
 | Differentiate w.r.t. `cov_vals` | ✅ | ✅ (`refine_logdet_grad_vals`, `generate_logdet_grad_vals`, `refine_inv_loss_grad_vals`, `generate_inv_loss_grad_vals`) |
 | → kernel hyperparameters | ✅ (autodiff through `rbf`/`matern`) | ✅ via `hyperparam_grad` (ForwardDiff chain rule) |
 | Differentiate w.r.t. `xi` / `points` | ✅ (autodiff) | ❌ |
@@ -66,8 +66,9 @@ Net: for **GP training/inference** (where the gradients that matter are of the l
 likelihood pieces — `logdet` and the quadratic form — w.r.t. kernel hyperparameters),
 GraphGP.jl is fully covered *and faster/more scalable* than Python (Python's only working
 gradient path is pure-JAX autodiff, which is ~1000× slower and OOMs at scale; the CUDA
-extension has no gradient at all). For **general AD** (e.g. d/dxi, d/dpoints, or gradients of
-an arbitrary user loss), Python is more flexible.
+extension differentiates the forward `generate` but has no `refine_logdet`/`refine_inv` gradient
+rule). For **general AD** (e.g. d/dxi, d/dpoints, or gradients of an arbitrary user loss), Python
+is more flexible.
 
 ## Gaps, by severity
 
