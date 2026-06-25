@@ -81,6 +81,42 @@ device time; the logdet reduction is 23 µs. Optimizing the per-point kernel is 
 5. **Exact-k instantiation everywhere** (already what the KA path does; the lesson for any custom
    kernel: instantiate `MAX_K = k`, never pad to a power of two).
 
+## Optimization results
+
+### Lever 1 — warp-cooperative Cholesky (prototyped, benchmarked, not adopted)
+
+Built a one-warp-per-point kernel (lane = matrix row; the `(k+1)` block in registers, shared by
+`__shfl`; O(k²) critical path) in `csrc/` and benchmarked it against the KA path (A6000, N=5 M,
+Float32, D=3, `refine_logdet`):
+
+| k | KA (M/s) | warp (M/s) | warp / KA |
+| --- | --- | --- | --- |
+| 8 | 417 | 148 | 0.35 |
+| 10 | 256 | 116 | 0.45 |
+| 16 | 74 | 55 | 0.74 |
+| 30 | 14 | 19 | **1.29** |
+
+It **only wins at large k** (~1.3× at k=30) and loses badly at the common k≈8–16 because with one
+warp per point only `k+1` of 32 lanes do work — the rest idle. So warp-per-point trades the
+local-memory bottleneck for a lane-utilization bottleneck, and for the science range it is a net
+loss. (It also needs to replicate KA's degenerate-column handling — `pivmin = eps(f32)·variance`,
+floor + zero — to stay correct on the coincident points that 2²¹ lattice quantization produces in a
+dense cloud; doing so faithfully tanked throughput further, confirming this is not the path.)
+
+**Conclusion:** the KA per-point kernel is already at/above the hand-written reference for this
+register/local-memory-bound workload, and warp-per-point does not beat it in the regime that
+matters. A genuine win for k≈8–16 would require **multiple points per warp** (pack 32/(k+1) points
+so no lane idles) — a substantially more complex kernel — and even then the ceiling is modest given
+KA already matches the reference. The experiment was reverted; the thread bridge (`refine_*_custom`)
+remains as the validated cross-check.
+
+### Levers 2–5 (not yet attempted)
+Given lever 1's outcome, the remaining levers are expected to be small: (2) register-resident matrix
+via full unrolling helps only small k (where we are already fast / gather-bound); (3) binning on r²
+to drop the O(k²) `sqrt` is cheap and could shave the assembly cost across k; (4) coalescing the
+neighbor gather targets the small-k regime. They are worth trying only if a specific k-regime needs
+it — the headline finding is that the portable path is already near-optimal.
+
 ## Method notes / caveats
 - No `ncu`/`nsys` here, so achieved occupancy, DRAM throughput %, and stall reasons are inferred, not
   directly measured. Installing Nsight Compute would let us confirm the local-memory (LSU) and
