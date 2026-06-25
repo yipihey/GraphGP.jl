@@ -21,6 +21,11 @@
 #include "vendor/covariance.h"
 #include "vendor/refine_logdet.h"
 #include "vendor/refine_inv.h"
+// Graph-build kernels (the hand-written shallow on-GPU build used by gp.build_graph(cuda=True)).
+#include "vendor/sort.h"
+#include "vendor/tree.h"
+#include "vendor/query.h"
+#include "vendor/depth.h"
 
 using i_t = int64_t;   // GraphGP.jl neighbors are Int64 (0-based here)
 using f_t = float;
@@ -85,6 +90,29 @@ int gpcuda_refine_inv_f32(const f_t* points, const i_t* neighbors, const f_t* co
 #define CALL_INV(MK, ND) launch_inv<MK, ND>(s, points, neighbors, cov_bins, cov_vals, values, xi, n0u, K, N, ncov)
     DISPATCH(CALL_INV);
 #undef CALL_INV
+    return (int)cudaPeekAtLastError();
+}
+
+// Fast SHALLOW on-GPU graph build — the same pipeline as gp.build_graph(cuda=True):
+// build_tree (special heap order) → query preceding k-NN → compute depths → order by depth.
+// `points_in`/`points` are point-major (D contiguous), `neighbors` is point-major (k contiguous,
+// 0-based), `depths` doubles as the split-dims scratch during the tree build. `temp` is 2N int32.
+int gpcuda_build_graph_f32(const f_t* points_in, f_t* points, int32_t* indices, int32_t* neighbors,
+        int32_t* depths, int32_t* temp, int64_t n0, int64_t k, int64_t n_points, int64_t ndim,
+        void* stream) {
+    cudaStream_t s = (cudaStream_t)stream;
+    size_t N = (size_t)n_points, K = (size_t)k, n0u = (size_t)n0, D = (size_t)ndim;
+    int32_t* temp_int = temp;
+    f_t* temp_float = reinterpret_cast<f_t*>(temp);
+    cudaMemcpyAsync(points, points_in, N * D * sizeof(f_t), cudaMemcpyDeviceToDevice, s);
+    build_tree(s, points_in, points, depths, indices, temp_int, temp_float + N, D, N);
+    size_t Q = N - n0u;
+#define CALL_Q(MK, ND) query_preceding_neighbors_kernel<MK, ND, int32_t, f_t><<<cld(Q, 256), 256, 0, s>>>(points, depths, neighbors, n0u, K, Q)
+    DISPATCH(CALL_Q);
+#undef CALL_Q
+    compute_depths_parallel(s, neighbors, depths, temp_int, n0u, K, N);
+    order_by_depth(s, points, indices, neighbors, depths, temp_int, temp_int + N, temp_float + N,
+        n0u, K, N, D);
     return (int)cudaPeekAtLastError();
 }
 

@@ -1,10 +1,23 @@
 # Custom-CUDA accelerator (optional)
 
-A thin C-ABI bridge that lets GraphGP.jl call **hand-written CUDA** kernels for the per-point,
-order-independent ops (`refine_logdet`, `refine_inv`), alongside the portable KernelAbstractions
-path. The device kernels are vendored from the original `graphgp_cuda` extension (`vendor/`, MIT,
-© Benjamin Dodge & Philipp Frank); `graphgp_capi.cu` wraps them in `extern "C"` launchers that take
-raw device pointers, and the `GraphGPCUDAExt` extension `ccall`s them on `CuArray`s.
+A thin C-ABI bridge that lets GraphGP.jl call **hand-written CUDA** kernels — the per-point
+ops (`refine_logdet`, `refine_inv`) **and the full shallow graph build** (`build_graph_cuda`) —
+alongside the portable KernelAbstractions path. The device kernels are vendored from the original
+`graphgp_cuda` extension (`vendor/`, MIT, © Benjamin Dodge & Philipp Frank); `graphgp_capi.cu`
+wraps them in `extern "C"` launchers that take raw device pointers, and the `GraphGPCUDAExt`
+extension `ccall`s them on `CuArray`s.
+
+**Where it pays off: the graph build.** `build_graph_cuda` (the hand-written build_tree → k-NN →
+depths → order pipeline) is **at parity with `gp.build_graph(cuda=True)`** (~4.6 s vs 4.1 s at 10 M,
+~55 s vs 49 s at 80 M on an A6000) and produces the same *shallow* graph as the CPU `build_graph` —
+closing the one place where the portable path lost at scale (CPU build is gather-bound; `build_graph_ka`
+is ~3× slower and deep). The per-point refine kernels, by contrast, do **not** beat KA (below).
+
+```julia
+using GraphGP, CUDA
+prob = build_graph_cuda(points, n0, k, bins, vals)   # fast shallow GPU build → GPU GraphGPProblem
+field = generate(prob, xi)                            # then the winning on-device forward/derivatives
+```
 
 ## Build (out-of-band; not part of the package build or CI)
 

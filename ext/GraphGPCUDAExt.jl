@@ -8,8 +8,9 @@ module GraphGPCUDAExt
 using GraphGP
 using CUDA
 using Libdl
-import GraphGP: refine_logdet_custom, refine_inv_custom, GraphGPProblem,
-    npoints, nrefined, nneighbors, ndims_space, nbins
+import GraphGP: refine_logdet_custom, refine_inv_custom, build_graph_cuda, GraphGPProblem,
+    npoints, nrefined, nneighbors, ndims_space, nbins,
+    quantize_to_lattice, _compute_offsets, _move_to_backend
 
 const LIBREF = Ref{Ptr{Cvoid}}(C_NULL)
 function _lib()
@@ -60,6 +61,39 @@ function refine_inv_custom(prob::GraphGPProblem, values::AbstractVector)
     rc == 0 || error("gpcuda_refine_inv_f32 returned $rc")
     CUDA.synchronize()
     return xi
+end
+
+function build_graph_cuda(points::AbstractMatrix, n0::Integer, k::Integer,
+        bins::AbstractVector, vals::AbstractVector; lattice_bits::Int = 21)
+    N, D = size(points)
+    M = N - n0
+    backend = CUDABackend()
+    # point-major (D, N) Float32 device input (D contiguous per point — the .cu layout).
+    pts_dn = CuArray{Float32}(undef, D, N)
+    pts_dn .= permutedims(points isa CuArray ? Float32.(points) : CuArray{Float32}(points))
+    pout = CuArray{Float32}(undef, D, N)
+    indices = CuArray{Int32}(undef, N)
+    neighbors = CuArray{Int32}(undef, k, M)          # (k,M) col-major = point-major, 0-based
+    depths = CuArray{Int32}(undef, N)
+    temp = CuArray{Int32}(undef, 2N)
+    rc = ccall(Libdl.dlsym(_lib(), :gpcuda_build_graph_f32), Cint,
+        (CuPtr{Float32}, CuPtr{Float32}, CuPtr{Int32}, CuPtr{Int32}, CuPtr{Int32}, CuPtr{Int32},
+         Int64, Int64, Int64, Int64, Ptr{Cvoid}),
+        pts_dn, pout, indices, neighbors, depths, temp, n0, k, N, D, _stream())
+    rc == 0 || error("gpcuda_build_graph_f32 returned $rc")
+    CUDA.synchronize()
+
+    # Quantise the reordered points to the integer lattice (as build_graph does on the host).
+    coords_nd, _, scale = quantize_to_lattice(permutedims(pout), lattice_bits)   # (N,D) UInt32
+    coords = permutedims(coords_nd)                                              # (D,N)
+    dh = Int.(Array(depths))
+    offsets = _compute_offsets(dh)                   # depths are ascending after order_by_depth
+    n0_final = count(==(0), dh)
+    nb1 = neighbors .+ Int32(1)                       # 0-based → 1-based
+    bins_b = bins isa CuArray{Float32} ? bins : CuArray{Float32}(bins)
+    vals_b = vals isa CuArray{Float32} ? vals : CuArray{Float32}(vals)
+    return GraphGPProblem(coords, nb1, offsets, n0_final, Float32(scale), bins_b, vals_b,
+        Array(indices) .+ 1)
 end
 
 end # module

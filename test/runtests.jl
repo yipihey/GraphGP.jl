@@ -265,6 +265,25 @@ let cuda_ok = false
                     xi_k = Array(refine_inv(pg, field))
                     @test sqrt(sum(abs2, xi_c .- xi_k)) / sqrt(sum(abs2, xi_k)) < 1e-4
                 end
+
+                @testset "build_graph_cuda: shallow GPU build matches CPU build_graph" begin
+                    rng = Random.MersenneTwister(7)
+                    N2, D2, n02, k2 = 20_000, 3, 256, 10
+                    p2 = randn(rng, N2, D2)
+                    b2, v2 = rbf_kernel(1.0f0, 0.3f0, 1f-4, 1f1, 200; jitter = 1f-2)
+                    gc = build_graph(p2, n02, k2, Float32.(b2), Float32.(v2))      # CPU reference
+                    gg = build_graph_cuda(p2, n02, k2, Float32.(b2), Float32.(v2)) # .cu GPU build
+                    @test gg.coords isa CuArray
+                    @test check_graph(gg) === nothing                              # valid Vecchia graph
+                    @test length(gg.offsets) == length(gc.offsets)                 # same shallow depth
+                    @test gg.n0 == gc.n0
+                    # same graph ⇒ same logdet to f32 (built identically: float tree, then quantize)
+                    @test isapprox(refine_logdet_custom(gg), refine_logdet(gc); rtol = 1e-4)
+                    # usable end-to-end
+                    xi2 = CuArray(randn(Float32, N2))
+                    @test isapprox(Array(generate_inv(gg, generate(gg, xi2))), Array(xi2);
+                        rtol = 1e-3, atol = 1e-4)
+                end
             end
         end
     end

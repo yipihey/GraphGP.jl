@@ -54,6 +54,6 @@ export DistributedGraphGPProblem, distribute, distributed_build_graph, distribut
 export PartitionedGraphGPProblem   # scheme B: partitioned coords + halo
 export save_graph, load_graph      # parallel checkpoint of a distributed graph
 # Optional hand-written CUDA accelerator (needs `using CUDA` + a built csrc/libgraphgpcapi.so)
-export refine_logdet_custom, refine_inv_custom
+export refine_logdet_custom, refine_inv_custom, build_graph_cuda
 
 end # module
