@@ -22,11 +22,13 @@ science carry no more); correctness is cross-checked in Float64 where it clarifi
   while the extension wins forward `generate` by ~1.1–1.2× (139 vs 119 ms). (At 1–2 M, below target
   scale, GraphGP.jl leads all three, but that's the extension's launch-overhead regime — §3.) The
   extension has **no** gradient rule for the log-det / inverse-loss ops, which GraphGP.jl adds (§4).
-- **Native, Python-free graph build — byte-identical to Python.** `build_graph` now constructs the
-  JAX "special order" heap-layout k-d tree and preceding-neighbour query in pure Julia, producing
-  a graph **identical** to `gp.build_graph` (permutation, split dims, every neighbour, depth
-  offsets) on float clouds, and shallow (≈tens of depth batches, not thousands) — which is what
-  makes the on-device sweeps fast (§7).
+- **Native, Python-free graph build — byte-identical to Python, but the weak spot at scale.**
+  `build_graph` builds the JAX "special order" heap-layout tree + preceding-neighbour query in pure
+  Julia, producing a graph **identical** to `gp.build_graph` (permutation, split dims, neighbours,
+  offsets) and shallow (≈tens of batches) — but it is **CPU-only and gather-bound**, so past ~10 M
+  it loses badly to JAX's `cuda=True` **GPU** build (e.g. 40 M: JAX 22 s vs GraphGP.jl CPU ~29 min).
+  The on-GPU `build_graph_ka` is ~3× slower than JAX's GPU build *and* produces deep graphs. A fast
+  *shallow on-GPU* build is the clear open lever (§5, and `docs/scaling-100B.md` for billions).
 - **Differentiation is also portable + analytically composable.** The same analytic adjoints (xi,
   cov_vals, log-det, inverse-loss, point positions) compose through Julia's ChainRules/Zygote and
   run on CPU **and** GPU — a surface the GPU-only extension does not fully cover (§4).
@@ -179,6 +181,28 @@ compile), seconds (lower is better):
 The Julia build is parallelized (threaded per-level passes + a parallel merge-sort) and is
 **byte-identical** to `gp.build_graph` (§7). This is the only fused CPU implementation of the core;
 the whole pipeline (build → refine → gradients) runs on CPU with no Python/CUDA dependency.
+
+### Build at high N — the honest weak spot
+
+Against JAX's **GPU** build (`cuda=True`), GraphGP.jl's build does **not** win at scale. Build to a
+usable graph, A6000 / EPYC 7763, K=8, seconds (lower is better):
+
+| N | JAX `cuda=True` (GPU, shallow) | GraphGP.jl `build_graph` (CPU, shallow, byte-identical) | GraphGP.jl `build_graph_ka` (GPU) |
+| --- | --- | --- | --- |
+| 10 M | **4.1** | 29 (109 batches) | 13 (6954 batches) |
+| 20 M | **9.5** | 82 | 31 (8844 batches) |
+| 40 M | **22** | 1735 ⚠ | 77 (11273 batches) |
+| 80 M | **49** | — (CPU-bound) | 190 (14407 batches) |
+
+Two honest facts: (1) GraphGP.jl's **byte-identical shallow build is CPU-only and gather-bound** —
+fine to ~10 M (29 s) but it falls off a memory cliff by 40 M (the `pts[p[i]]` permutation gather
+thrashes once the working set ≫ L3; the 40 M point is anomalously bad). (2) Its **on-GPU builder
+`build_graph_ka` is ~3× slower than JAX's GPU build *and* produces deep graphs** (thousands of depth
+batches from the sort-based leaf-order tree, vs ~hundreds for the shallow heap order) — so it is not
+a drop-in for fast generation. **GraphGP.jl has no fast *shallow* on-GPU build yet** — that (or the
+distributed build for billions; see `docs/scaling-100B.md`) is the clear open lever. For now: build
+on a fat node with `build_graph` (≤ ~10 M) or accept JAX's `cuda=True` build, then run the
+fast/winning GraphGP.jl forward + derivatives (§2) on the result.
 
 ## 6. Robustness — degenerate / coincident points
 
