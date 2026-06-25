@@ -213,6 +213,7 @@ and kept as a validated cross-check + a drop-in point for future kernels. See
 
 - [`docs/benchmarks.md`](docs/benchmarks.md) — performance, memory, correctness vs the CUDA extension.
 - [`docs/comparison_with_jax.md`](docs/comparison_with_jax.md) — design + throughput vs JAX, annotated.
+- [`docs/perf-analysis.md`](docs/perf-analysis.md) — what limits the per-point GPU kernels (local-memory-bound O(k³) Cholesky) and the optimization levers.
 - [`docs/scaling-100B.md`](docs/scaling-100B.md) — design notes + API sketch for distributed (multi-node/GPU) scaling to ~100 B points.
 - [`FEATURE_COVERAGE.md`](FEATURE_COVERAGE.md) — function-by-function parity audit vs Python `graphgp`.
 - [`bench/compare/`](bench/compare/) — the apples-to-apples comparison harness (one shared graph).
