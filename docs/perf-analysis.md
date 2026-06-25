@@ -110,12 +110,39 @@ so no lane idles) — a substantially more complex kernel — and even then the 
 KA already matches the reference. The experiment was reverted; the thread bridge (`refine_*_custom`)
 remains as the validated cross-check.
 
-### Levers 2–5 (not yet attempted)
-Given lever 1's outcome, the remaining levers are expected to be small: (2) register-resident matrix
-via full unrolling helps only small k (where we are already fast / gather-bound); (3) binning on r²
-to drop the O(k²) `sqrt` is cheap and could shave the assembly cost across k; (4) coalescing the
-neighbor gather targets the small-k regime. They are worth trying only if a specific k-regime needs
-it — the headline finding is that the portable path is already near-optimal.
+### Lever 3 — drop the O(k²) sqrt (r²-space lookup): no speedup
+
+Added a covariance assembly that searches the *squared* bins on r² and interpolates in r²-space,
+removing one `sqrt` per matrix entry. Benchmarked vs the with-sqrt thread kernel (A6000, N=5 M):
+
+| k | thread (M/s) | no-sqrt (M/s) | no-sqrt / thread |
+| --- | --- | --- | --- |
+| 4 | 515 | 496 | 0.96 |
+| 8 | 334 | 328 | 0.98 |
+| 10 | 204 | 204 | 1.00 |
+| 16 | 72 | 70 | 0.97 |
+
+**No measurable speedup** — the kernel is local-memory/Cholesky-bound, so the `sqrt` (SFU) is already
+hidden behind memory latency; removing it changes nothing. (Side result: the no-sqrt vs KA and
+with-sqrt vs KA errors are *identical*, so r²-space interpolation is accuracy-equivalent to r-space
+here — the ~4 % drift is the separate float-position cancellation, not the interp scheme.) Reverted.
+
+### Levers 2, 4 (not pursued)
+Lever 1 and lever 3 both confirm the kernel is bound by the local-memory-resident `(k+1)²` matrix in
+a serial Cholesky, not by peripheral costs. (2) register-resident matrix via full unrolling and
+(4) gather coalescing only touch small-k / the gather, where we are already fast — given the two
+negative results above, they are not expected to move the needle.
+
+## Verdict
+
+Two of the ranked levers were implemented and benchmarked; both are negative. The portable KA
+per-point kernel is **already near-optimal** for this register/local-memory-bound, occupancy-rich
+workload — it matches the f64 reference to ~2e-7 and meets or beats the hand-written `graphgp_cuda`
+reference. The *only* approach that could plausibly beat it in the common k≈8–32 range is a
+**multi-point-per-warp** kernel (pack `32/(k+1)` points so no warp lane idles, matrix in shared
+memory) — a substantially more complex kernel with a modest expected ceiling. Recommendation: keep
+the KA path as the production GPU path; revisit multi-point-per-warp only if profiling on the real
+science workload shows the per-point kernel is the wall-clock bottleneck.
 
 ## Method notes / caveats
 - No `ncu`/`nsys` here, so achieved occupancy, DRAM throughput %, and stall reasons are inferred, not
