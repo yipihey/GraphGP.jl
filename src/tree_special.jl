@@ -54,16 +54,25 @@ function build_tree_special(points::Matrix{Float64})
     N, D = size(points)
     n_levels = N > 0 ? (_flevel(N) + 1) : 0     # N.bit_length()
 
+    # `nodes` and `pad` are captured by the sort comparator below, so they are assigned EXACTLY
+    # ONCE and only ever mutated in place (via the scratch buffers + copyto!). Reassigning a
+    # captured variable would box it (`Core.Box`), making every sort comparison type-unstable and
+    # heap-allocating — that was ~16 GB of garbage and ~90% of build time. `pts`/`indices` are not
+    # captured, so they are cheaply double-buffered by swapping.
     pts = copy(points)                          # pts[i,:] = point currently at position i
+    pts_s = similar(pts)                        # scratch for the permuted gather
     nodes = zeros(Int, N)                       # 0-based heap node id of point at position i
+    nodes_s = Vector{Int}(undef, N)             # scratch (permute + _update_nodes)
     indices = collect(1:N)                      # original 1-based index of point at position i
+    indices_s = Vector{Int}(undef, N)
     split_dims = fill(-1, N)                    # node-id-indexed (NEVER permuted by the sorts)
 
     seg_max = Matrix{Float64}(undef, N, D)
     seg_min = Matrix{Float64}(undef, N, D)
     pad = Vector{Float64}(undef, N)
     p = Vector{Int}(undef, N)
-    # Non-allocating lexicographic comparator for (nodes, points_along_dim, position).
+    # Non-allocating lexicographic comparator for (nodes, points_along_dim, position). Total order
+    # (the `a < b` tie-break), so QuickSort is deterministic and needs no temp buffer.
     lt = (a, b) -> begin
         @inbounds begin
             na = nodes[a]; nb = nodes[b]
@@ -91,7 +100,6 @@ function build_tree_special(points::Matrix{Float64})
         end
 
         # split_dims[i] = where(array_index < n_above, split_dims[i], argmax_d range(segment i))
-        # (array_index is 0-based position i-1; segment id == array_index here).
         @inbounds for i in 1:N
             (i - 1) < n_above && continue
             bestd = 1
@@ -112,38 +120,39 @@ function build_tree_special(points::Matrix{Float64})
             pad[i] = pts[i, sd]
         end
 
-        # Sort by (nodes, points_along_dim, array_index); array_index (= position) is the
-        # stable 3rd key (total order, so the unstable sort is deterministic). Apply the
-        # permutation to pts / nodes / indices (NOT to split_dims).
+        # Sort positions by (nodes, points_along_dim, array_index), then apply the permutation in
+        # place (NOT to split_dims). `nodes` must stay the same object → gather into scratch + copy.
         @inbounds for i in 1:N
             p[i] = i
         end
-        sort!(p; lt = lt)
-        pts = pts[p, :]
-        nodes = nodes[p]
-        indices = indices[p]
+        sort!(p; lt = lt, alg = QuickSort)
+        @inbounds for i in 1:N
+            pp = p[i]
+            for d in 1:D
+                pts_s[i, d] = pts[pp, d]
+            end
+            nodes_s[i] = nodes[pp]
+            indices_s[i] = indices[pp]
+        end
+        pts, pts_s = pts_s, pts                  # not captured → swap is free
+        indices, indices_s = indices_s, indices  # not captured → swap is free
+        copyto!(nodes, nodes_s)                  # captured → mutate in place, never rebind
 
         # _update_nodes: keep each segment's median at its node id, send earlier points to the
-        # left child id and later points to the right child id.
+        # left child id and later points to the right child id. Write into scratch, copy back.
         n_remaining = N - n_above
         q = div(n_remaining, n_level)
         r = rem(n_remaining, n_level)
-        newnodes = Vector{Int}(undef, N)
         @inbounds for i in 1:N
             idx = i - 1                          # array_index (0-based position)
             s = nodes[i]
             ii = s - n_above
             mid = (ii < r ? ii * (q + 1) + div(q + 1, 2) :
                             r * (q + 1) + (ii - r) * q + div(q, 2)) + n_above
-            if idx < n_above || idx == mid
-                newnodes[i] = s
-            elseif idx < mid
-                newnodes[i] = s + n_level
-            else
-                newnodes[i] = s + 2 * n_level
-            end
+            nodes_s[i] = (idx < n_above || idx == mid) ? s :
+                         (idx < mid ? s + n_level : s + 2 * n_level)
         end
-        nodes = newnodes
+        copyto!(nodes, nodes_s)
     end
 
     return pts, split_dims, indices
@@ -229,19 +238,26 @@ function query_preceding_neighbors_special(sorted_pts::Matrix{Float64}, split_di
     D = size(sorted_pts, 2)
     M = N - n0
     neighbors = zeros(Int, k, M)
-    cand_d = Vector{Float64}(undef, k)
-    cand_i = Vector{Int}(undef, k)
-    order = Vector{Int}(undef, k)
-    for m in (n0 + 1):N
-        query = m - 1                            # 0-based node id of this point
-        max_index = query                        # preceding: nodes strictly < query
-        _sp_query_one!(cand_d, cand_i, sorted_pts, split_dims, query, max_index, k, D)
-        # sort candidates by (distance, index) ascending — JAX lax.sort num_keys=2.
-        sortperm!(order, 1:k; by = j -> (cand_d[j], cand_i[j]))
-        col = m - n0
-        @inbounds for j in 1:k
-            ci = cand_i[order[j]]
-            neighbors[j, col] = ci + 1           # 0-based node id -> 1-based tree position
+    # Each query point is independent (read-only tree traversal, disjoint output column), so the
+    # M queries run in parallel. Chunk across threads with per-thread scratch (the sort `by` closure
+    # captures the per-thread cand_* — assigned once per task, so it stays type-stable).
+    nt = max(1, min(Threads.nthreads(), M))
+    chunks = collect(Iterators.partition((n0 + 1):N, cld(M, nt)))
+    Threads.@threads :static for chunk in chunks
+        cand_d = Vector{Float64}(undef, k)
+        cand_i = Vector{Int}(undef, k)
+        order = Vector{Int}(undef, k)
+        for m in chunk
+            query = m - 1                        # 0-based node id of this point
+            max_index = query                    # preceding: nodes strictly < query
+            _sp_query_one!(cand_d, cand_i, sorted_pts, split_dims, query, max_index, k, D)
+            # sort candidates by (distance, index) ascending — JAX lax.sort num_keys=2.
+            sortperm!(order, 1:k; by = j -> (cand_d[j], cand_i[j]))
+            col = m - n0
+            @inbounds for j in 1:k
+                ci = cand_i[order[j]]
+                neighbors[j, col] = ci + 1       # 0-based node id -> 1-based tree position
+            end
         end
     end
     return neighbors
