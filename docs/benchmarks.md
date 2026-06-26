@@ -120,20 +120,25 @@ plus `std`, roughly **halving every op's transient**:
 | d/dcov_vals | 2.76 GiB (69 B/pt) | **1.42 GiB (35 B/pt)** |
 
 The persistent graph (`prob`) is 44 B/pt (coords UInt32 + Int32 neighbours at K=8); the working set
-during any op is now `prob + ~35 B/pt` (was `prob + ~69 B/pt`). Measured on a free 44 GB A6000: a
-single fresh run computes the **full triplet at ≥320 M** (1.33× over the prior 240 M ceiling) with
-~10 GB still free, and at a fixed 240 M leaves **17.4 GB free (was 0.7 GB)** — the ~16.7 GB the fused
-ops no longer hold. (A back-to-back 240→280→300 M sweep in one process OOMs at 300 M, but that is
-**pool fragmentation across iterations**, not a real limit — each N builds fine in a fresh process.)
+during any op is now `prob + ~35 B/pt` (was `prob + ~69 B/pt`). Combined with a leaner `build_graph_cuda`
+(below), this raises the **full-triplet GPU-fill ceiling from 240 M → 440 M (1.83×)** on a free 44 GB
+A6000: 360 M / 400 M / 440 M all compute the full forward + both derivatives (free-after 11.6 / 9.0 /
+5.5 GB), 480 M OOMs. At a fixed 240 M the run leaves **17.4 GB free (was 0.7 GB)** — the ~16.7 GB the
+fused ops no longer hold. (Probe each N in its own process or with a full `CUDA.reclaim()` between
+runs; a back-to-back sweep in one process can OOM early purely from pool fragmentation.)
 
-What now bounds N is the **graph build's transient peak**, not the compute ops: `build_graph_cuda`
-momentarily holds the caller's input coords, a permuted copy, the output coords, a 2N `temp` buffer,
-and `depths` alongside the persistent `neighbors` (Int32 (K,N) ≈ 9.6 GB at 300 M). Shrinking that
-build peak (in-place permute, freeing the input/scratch copies before the persistent arrays coexist)
-is the next lever and is **build-time only — the per-point gather/compute kernels are untouched, so
-it costs no throughput.** Shrinking the *persistent* `neighbours` further is not free: Int32 is
-already the minimum width for global indices at this N, and delta/Int16 encodings would add
-indirection to the `_gather_joint!` hot path.
+Two changes got there, both leaving the per-point gather/compute kernels — and thus throughput —
+untouched:
+1. **Fused ops** (above): no materialised `mean_vec`, so each op's transient roughly halves.
+2. **Leaner build.** `build_graph_cuda` no longer duplicates the 32 B/pt `neighbors` array for the
+   0→1-based shift (`neighbors .+= 1` in place — was a full 9.6 GB copy at 300 M), permutes the input
+   in place (`permutedims!`, no temp), and frees the input/scratch copies (`pts_dn`, `temp`, `depths`,
+   intermediate coords) as soon as they are dead instead of letting them coexist with the persistent
+   arrays. All build-time only.
+
+Shrinking the *persistent* `neighbours` further is not free: Int32 is already the minimum width for
+global indices at this N, and delta/Int16 encodings would add indirection to the `_gather_joint!`
+hot path, so they are deliberately not done.
 
 **At GPU-fill, GraphGP.jl computes the full forward + both derivatives, but the
 extension's combined run OOMs on the derivatives.** † A *single* extension derivative fits at 240 M

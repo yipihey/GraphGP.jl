@@ -69,8 +69,12 @@ function build_graph_cuda(points::AbstractMatrix, n0::Integer, k::Integer,
     M = N - n0
     backend = CUDABackend()
     # point-major (D, N) Float32 device input (D contiguous per point — the .cu layout).
+    # Permute in place (permutedims! allocates no intermediate; `pts_dn .= permutedims(…)` would
+    # materialise a full (D,N) temp) and free the source copy as soon as it is consumed.
     pts_dn = CuArray{Float32}(undef, D, N)
-    pts_dn .= permutedims(points isa CuArray ? Float32.(points) : CuArray{Float32}(points))
+    src = points isa CuArray{Float32} ? points : CuArray{Float32}(points)   # (N,D) on device
+    permutedims!(pts_dn, src, (2, 1))
+    src === points || CUDA.unsafe_free!(src)
     pout = CuArray{Float32}(undef, D, N)
     indices = CuArray{Int32}(undef, N)
     neighbors = CuArray{Int32}(undef, k, M)          # (k,M) col-major = point-major, 0-based
@@ -82,17 +86,27 @@ function build_graph_cuda(points::AbstractMatrix, n0::Integer, k::Integer,
         pts_dn, pout, indices, neighbors, depths, temp, n0, k, N, D, _stream())
     rc == 0 || error("gpcuda_build_graph_f32 returned $rc")
     CUDA.synchronize()
+    # `pts_dn` (input copy) and `temp` (build scratch) are dead now — free before the quantise
+    # buffers and the persistent arrays coexist, to keep the transient peak down at large N.
+    CUDA.unsafe_free!(pts_dn)
+    CUDA.unsafe_free!(temp)
 
-    # Quantise the reordered points to the integer lattice (as build_graph does on the host).
-    coords_nd, _, scale = quantize_to_lattice(permutedims(pout), lattice_bits)   # (N,D) UInt32
-    coords = permutedims(coords_nd)                                              # (D,N)
-    dh = Int.(Array(depths))
-    offsets = _compute_offsets(dh)                   # depths are ascending after order_by_depth
+    # Quantise the reordered points to the integer lattice (as build_graph does on the host),
+    # freeing each transient as it is consumed so at most one extra (·,N) copy is live at a time.
+    pout_nd = permutedims(pout)                      # (N,D)
+    CUDA.unsafe_free!(pout)
+    coords_nd, _, scale = quantize_to_lattice(pout_nd, lattice_bits)   # (N,D) UInt32
+    CUDA.unsafe_free!(pout_nd)
+    coords = permutedims(coords_nd)                  # (D,N)
+    CUDA.unsafe_free!(coords_nd)
+    dh = Int.(Array(depths))                         # depths are ascending after order_by_depth
+    CUDA.unsafe_free!(depths)
+    offsets = _compute_offsets(dh)
     n0_final = count(==(0), dh)
-    nb1 = neighbors .+ Int32(1)                       # 0-based → 1-based
+    neighbors .+= Int32(1)                           # 0-based → 1-based, IN PLACE (no duplicate)
     bins_b = bins isa CuArray{Float32} ? bins : CuArray{Float32}(bins)
     vals_b = vals isa CuArray{Float32} ? vals : CuArray{Float32}(vals)
-    return GraphGPProblem(coords, nb1, offsets, n0_final, Float32(scale), bins_b, vals_b,
+    return GraphGPProblem(coords, neighbors, offsets, n0_final, Float32(scale), bins_b, vals_b,
         Array(indices) .+ 1)
 end
 
