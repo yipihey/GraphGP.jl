@@ -120,14 +120,20 @@ plus `std`, roughly **halving every op's transient**:
 | d/dcov_vals | 2.76 GiB (69 B/pt) | **1.42 GiB (35 B/pt)** |
 
 The persistent graph (`prob`) is 44 B/pt (coords UInt32 + Int32 neighbours at K=8); the working set
-during any op is now `prob + ~35 B/pt` (was `prob + ~69 B/pt`). Measured on a free 44 GB A6000: the
-**full-triplet GPU-fill ceiling rises from 240 M → 280 M** (1.17×), and at a fixed 240 M the run now
-leaves **17.4 GB free (was 0.7 GB)** — the ~16.7 GB the fused ops no longer hold. The ceiling moves
-less than the per-op saving because the binding constraint has shifted to the **graph build**: at
-300 M the OOM is a single 8.94 GiB allocation — the persistent `neighbors` array (Int32 (K,N) ≈
-9.6 GB at K=8) plus `build_graph_cuda`'s sort scratch. The compute ops themselves now have ample
-headroom (240 M leaves 17.4 GB); reducing the build peak (e.g. Int16 neighbour deltas, or a
-streamed/tiled build) is the next lever for higher N.
+during any op is now `prob + ~35 B/pt` (was `prob + ~69 B/pt`). Measured on a free 44 GB A6000: a
+single fresh run computes the **full triplet at ≥320 M** (1.33× over the prior 240 M ceiling) with
+~10 GB still free, and at a fixed 240 M leaves **17.4 GB free (was 0.7 GB)** — the ~16.7 GB the fused
+ops no longer hold. (A back-to-back 240→280→300 M sweep in one process OOMs at 300 M, but that is
+**pool fragmentation across iterations**, not a real limit — each N builds fine in a fresh process.)
+
+What now bounds N is the **graph build's transient peak**, not the compute ops: `build_graph_cuda`
+momentarily holds the caller's input coords, a permuted copy, the output coords, a 2N `temp` buffer,
+and `depths` alongside the persistent `neighbors` (Int32 (K,N) ≈ 9.6 GB at 300 M). Shrinking that
+build peak (in-place permute, freeing the input/scratch copies before the persistent arrays coexist)
+is the next lever and is **build-time only — the per-point gather/compute kernels are untouched, so
+it costs no throughput.** Shrinking the *persistent* `neighbours` further is not free: Int32 is
+already the minimum width for global indices at this N, and delta/Int16 encodings would add
+indirection to the `_gather_joint!` hot path.
 
 **At GPU-fill, GraphGP.jl computes the full forward + both derivatives, but the
 extension's combined run OOMs on the derivatives.** † A *single* extension derivative fits at 240 M
